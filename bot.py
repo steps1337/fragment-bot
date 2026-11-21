@@ -39,13 +39,18 @@ log = logging.getLogger("fragment-bot")
 # =========================================================
 #                  НАСТРОЙКА БОТА И ПРОКСИ
 # =========================================================
-print(f"🔄 Инициализация сессии через прокси: {PROXY_URL}")
-TIMEOUT_SECONDS = 60 
+PROXY_URL = os.getenv("PROXY_URL") # Берем из переменных окружения (может быть пустым)
+
+if PROXY_URL:
+    print(f"🔄 Инициализация сессии через прокси: {PROXY_URL}")
+    session = AiohttpSession(proxy=PROXY_URL, timeout=TIMEOUT_SECONDS)
+else:
+    print("✅ Инициализация сессии без прокси (прямое соединение).")
+    session = AiohttpSession(timeout=TIMEOUT_SECONDS)
 
 try:
-    session = AiohttpSession(proxy=PROXY_URL, timeout=TIMEOUT_SECONDS)
     bot = Bot(token=BOT_TOKEN, session=session)
-    print("✅ Бот успешно инициализирован с прокси.")
+    print("✅ Бот успешно инициализирован.")
 except Exception as e:
     print(f"❌ Критическая ошибка при создании сессии: {e}")
     raise e
