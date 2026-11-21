@@ -4,3 +4,4 @@ uvicorn
 pydantic
 aiohttp
 gunicorn
+aiohttp-socks
