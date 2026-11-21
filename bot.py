@@ -30,7 +30,7 @@ MINI_APP_URL = os.getenv("MINI_APP_URL", "https://steps1337.github.io/mini-app-f
 PROXY_URL = "http://r2nEE7:NA4P02@168.196.238.49:9316"
 
 API_HOST = "0.0.0.0"
-API_PORT = int(os.getenv("API_PORT", "8080"))
+API_PORT = int(os.getenv("PORT", 8000)) # Render использует PORT, по дефолту 8000
 DB_PATH = os.path.join(os.path.dirname(__file__), "deals.db")
 
 logging.basicConfig(level=logging.INFO)
@@ -53,7 +53,7 @@ except Exception as e:
 dp = Dispatcher()
 
 # =========================================================
-#                  БАЗА ДАННЫХ (SQLite)
+#                  БАЗА ДАННЫХ (SQLite) С МИГРАЦИЕЙ
 # =========================================================
 def db_init():
     con = sqlite3.connect(DB_PATH)
@@ -61,7 +61,7 @@ def db_init():
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             balance REAL DEFAULT 0.0,
-            name TEXT
+            name TEXT DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS deals (
             id           TEXT PRIMARY KEY,
@@ -76,6 +76,14 @@ def db_init():
             created_at   TEXT NOT NULL
         );
     """)
+    
+    # Миграция для старых баз данных (добавление столбца name)
+    cursor = con.execute("PRAGMA table_info(users)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if 'name' not in columns:
+        print("🔧 Обнаружена старая БД. Добавляю столбец 'name'...")
+        con.execute("ALTER TABLE users ADD COLUMN name TEXT DEFAULT ''")
+        
     con.commit()
     con.close()
 
@@ -120,7 +128,7 @@ class AcceptDealIn(BaseModel):
     partner_id: int
     partner_name: str
 
-# Модель для новой логики создания сделки через "+"
+# Модель для новой логики создания сделки через "+" в Mini App
 class NewDealRequest(BaseModel):
     buyer_id: int
     buyer_name: str
@@ -380,7 +388,7 @@ async def cb_reject(callback: CallbackQuery):
         await callback.message.edit_text(f"❌ Сделка {deal_id} отклонена.")
     con.close()
 
-@dp.message(Command("promo"))  # <-- ВАЖНО: именно Command("promo"), а не CommandObject
+@dp.message(Command("promo"))
 async def cmd_promo(message: Message, command: CommandObject):
     ensure_user(message.from_user.id)
     if not command.args:
@@ -396,8 +404,6 @@ async def cmd_promo(message: Message, command: CommandObject):
     if code in PROMO_CODES:
         amount = PROMO_CODES[code]
         add_balance(message.from_user.id, amount)
-        # Удаляем код из словаря, чтобы он стал одноразовым
-        # (Внимание: это работает только пока бот запущен, после перезагрузки коды вернутся)
         PROMO_CODES.pop(code, None) 
         await message.answer(f"✅ *Код успешно активирован!*\n\nВам начислено: **{amount} ₽**", parse_mode="Markdown")
     else:
