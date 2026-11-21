@@ -380,7 +380,7 @@ async def cb_reject(callback: CallbackQuery):
         await callback.message.edit_text(f"❌ Сделка {deal_id} отклонена.")
     con.close()
 
-@dp.message(CommandObject("promo"))
+@dp.message(Command("promo"))  # <-- ВАЖНО: именно Command("promo"), а не CommandObject
 async def cmd_promo(message: Message, command: CommandObject):
     ensure_user(message.from_user.id)
     if not command.args:
@@ -396,7 +396,9 @@ async def cmd_promo(message: Message, command: CommandObject):
     if code in PROMO_CODES:
         amount = PROMO_CODES[code]
         add_balance(message.from_user.id, amount)
-        del PROMO_CODES[code]
+        # Удаляем код из словаря, чтобы он стал одноразовым
+        # (Внимание: это работает только пока бот запущен, после перезагрузки коды вернутся)
+        PROMO_CODES.pop(code, None) 
         await message.answer(f"✅ *Код успешно активирован!*\n\nВам начислено: **{amount} ₽**", parse_mode="Markdown")
     else:
         await message.answer("❌ Неверный или уже использованный промокод.")
