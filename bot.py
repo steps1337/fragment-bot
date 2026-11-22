@@ -27,7 +27,7 @@ PROXY_URL = os.getenv("PROXY_URL")  # Опционально
 TIMEOUT_SECONDS = 60
 API_PORT = int(os.getenv("PORT", 8000))
 DB_PATH = os.path.join(os.path.dirname(__file__), "deals.db")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # Ваш Telegram ID для уведомлений
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # Ваш Telegram ID
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("fragment-bot")
@@ -52,7 +52,7 @@ except Exception as e:
 dp = Dispatcher()
 
 # =========================================================
-#                  БАЗА ДАННЫХ (SQLite) С МИГРАЦИЕЙ
+#                  БАЗА ДАННЫХ (SQLite)
 # =========================================================
 def db_init():
     con = sqlite3.connect(DB_PATH)
@@ -129,7 +129,6 @@ def add_balance(user_id: int, amount: float):
     con.close()
 
 def freeze_balance(user_id: int, amount: float) -> bool:
-    """Списывает средства (гарант). Возвращает True если успешно."""
     con = db_conn()
     row = con.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
     if not row or row["balance"] < amount:
@@ -142,7 +141,6 @@ def freeze_balance(user_id: int, amount: float) -> bool:
     return True
 
 def unfreeze_balance(user_id: int, amount: float):
-    """Возвращает замороженные средства."""
     ensure_user(user_id)
     con = db_conn()
     con.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
@@ -161,13 +159,13 @@ class NewDealRequest(BaseModel):
 
 class DealActionIn(BaseModel):
     user_id: int
-    action: str  # 'delivered' или 'received'
+    action: str
 
 class WithdrawRequest(BaseModel):
     user_id: int
     amount: float
-    method: str          # 'sbp' | 'card' | 'crypto'
-    requisites: str      # телефон / номер карты / "TRC20: адрес" и т.п.
+    method: str
+    requisites: str
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -255,7 +253,6 @@ async def create_deal_from_app(req: NewDealRequest):
 
     return {"status": "ok", "deal_id": deal_id}
 
-# --- ВЫВОД СРЕДСТВ ---
 @api.post("/api/withdraw")
 async def create_withdrawal(req: WithdrawRequest):
     if req.amount < 500:
@@ -445,7 +442,6 @@ async def cb_reject(callback: CallbackQuery):
         await callback.message.edit_text(f"❌ Сделка {deal_id} отклонена.")
     con.close()
 
-# --- АДМИН: ПОДТВЕРЖДЕНИЕ / ОТКЛОНЕНИЕ ВЫВОДА ---
 @dp.callback_query(F.data.startswith("wdone_"))
 async def cb_withdraw_done(callback: CallbackQuery):
     wid = int(callback.data.split("_")[1])
@@ -475,7 +471,6 @@ async def cb_withdraw_reject(callback: CallbackQuery):
         await callback.answer("Заявка уже обработана", show_alert=True)
         con.close()
         return
-    # Возвращаем деньги пользователю
     con.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (row["amount"], row["user_id"]))
     con.execute("UPDATE withdrawals SET status = 'rejected' WHERE id = ?", (wid,))
     con.commit()
@@ -503,6 +498,69 @@ async def cmd_promo(message: Message, command: CommandObject):
         await message.answer(f"✅ *Код активирован!* Начислено: **{amount} ₽**", parse_mode="Markdown")
     else:
         await message.answer("❌ Неверный или использованный промокод.")
+
+# --- АДМИН ПАНЕЛЬ: КОД И ВЫДАЧА БАЛАНСА ---
+admin_sessions = set()
+
+@dp.message(Command("code"))
+async def cmd_code(message: Message, command: CommandObject):
+    if not command.args:
+        await message.answer("Введите код: /code <код>")
+        return
+        
+    secret_code = command.args.strip()
+    
+    if secret_code == "555":
+        admin_sessions.add(message.from_user.id)
+        await message.answer("✅ Доступ разрешен! Теперь вы можете выдавать баланс.\n\nПример: `/addbal 1000 rub`", parse_mode="Markdown")
+    else:
+        # Если код неверный, можно ничего не отвечать, либо ответить ошибкой. 
+        # Оставим ответ для удобства.
+        await message.answer("❌ Неверный код.")
+
+@dp.message(Command("addbal"))
+async def cmd_addbal(message: Message, command: CommandObject):
+    # Если пользователя нет в списке, просто игнорируем команду
+    if message.from_user.id not in admin_sessions:
+        return
+
+    if not command.args:
+        await message.answer("Использование: `/addbal <сумма> <валюта>`\nВалюты: rub, star, ton, usdt", parse_mode="Markdown")
+        return
+
+    parts = command.args.strip().split()
+    if len(parts) != 2:
+        await message.answer("Неверный формат. Пример: `/addbal 1000 rub`", parse_mode="Markdown")
+        return
+
+    try:
+        amount = float(parts[0].replace(",", "."))
+        currency = parts[1].lower()
+    except ValueError:
+        await message.answer("❌ Неверная сумма.")
+        return
+
+    valid_currencies = ["rub", "star", "ton", "usdt"]
+    if currency not in valid_currencies:
+        await message.answer(f"❌ Неизвестная валюта. Доступны: {', '.join(valid_currencies)}")
+        return
+
+    rates_to_rub = {
+        "rub": 1.0,
+        "star": 1.5,
+        "ton": 500.0,
+        "usdt": 90.0
+    }
+    
+    rub_amount = amount * rates_to_rub[currency]
+    add_balance(message.from_user.id, rub_amount)
+    new_bal = get_balance(message.from_user.id)
+    
+    await message.answer(
+        f"✅ Начислено: *{amount} {currency.upper()}* (эквивалент {rub_amount} ₽).\n"
+        f"Текущий баланс: *{new_bal} ₽*", 
+        parse_mode="Markdown"
+    )
 
 @dp.pre_checkout_query()
 async def process_pre_checkout(query: PreCheckoutQuery):
