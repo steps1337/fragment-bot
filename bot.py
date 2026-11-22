@@ -73,6 +73,7 @@ def db_init():
             seller_id    INTEGER NOT NULL,
             role         TEXT NOT NULL,
             amount       REAL NOT NULL,
+            currency     TEXT NOT NULL DEFAULT 'RUB',
             description  TEXT,
             status       TEXT NOT NULL DEFAULT 'pending',
             created_at   TEXT NOT NULL
@@ -158,6 +159,7 @@ class NewDealRequest(BaseModel):
     amount: float
     description: str = ""
     role: str 
+    currency: str = "RUB"
 
 class DealActionIn(BaseModel):
     user_id: int
@@ -201,7 +203,6 @@ async def get_user(user_id: int):
 async def list_deals(user_id: int):
     ensure_user(user_id)
     con = db_conn()
-    # Ищем сделки, где юзер либо покупатель, либо продавец
     rows = con.execute(
         "SELECT * FROM deals WHERE buyer_id = ? OR seller_id = ? ORDER BY created_at DESC",
         (user_id, user_id),
@@ -233,14 +234,14 @@ async def create_deal_from_app(req: NewDealRequest):
     con = db_conn()
     try:
         con.execute(
-            """INSERT INTO deals (id, owner_id, owner_name, partner_id, partner_name, buyer_id, seller_id, role, amount, description, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'buyer', ?, ?, 'pending', ?)""",
-            (deal_id, buyer_id, buyer_name, seller_id, seller_name, buyer_id, seller_id, req.amount, req.description, now)
+            """INSERT INTO deals (id, owner_id, owner_name, partner_id, partner_name, buyer_id, seller_id, role, amount, currency, description, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'buyer', ?, ?, ?, 'pending', ?)""",
+            (deal_id, buyer_id, buyer_name, seller_id, seller_name, buyer_id, seller_id, req.amount, req.currency, req.description, now)
         )
         con.commit()
         
         kb = InlineKeyboardBuilder()
-        kb.button(text=f"✅ Принять ({int(req.amount)}₽)", callback_data=f"accept_{deal_id}")
+        kb.button(text=f"✅ Принять ({int(req.amount)} {req.currency})", callback_data=f"accept_{deal_id}")
         kb.button(text="❌ Отклонить", callback_data=f"reject_{deal_id}")
         kb.adjust(2)
         
@@ -249,7 +250,7 @@ async def create_deal_from_app(req: NewDealRequest):
             req.partner_id,
             f"💰 *Новая сделка!*\n\n"
             f"Создатель: {req.creator_name} ({role_text})\n"
-            f"Сумма: {req.amount} ₽\n"
+            f"Сумма: {req.amount} {req.currency}\n"
             f"Описание: {req.description}\n"
             f"ID: `{deal_id}`\n\n"
             f"⚠️ Для принятия сделки на балансе продавца должно быть *{req.amount} ₽* (гарант).\n"
@@ -429,13 +430,14 @@ async def cb_accept(callback: CallbackQuery):
 
     user_id = callback.from_user.id
     amount = deal["amount"]
+    currency = deal["currency"]
     buyer_id = deal["buyer_id"]
     seller_id = deal["seller_id"]
 
     if user_id == seller_id:
         if not freeze_balance(seller_id, amount):
             bal = get_balance(seller_id)
-            await callback.answer(f"Недостаточно средств! Нужно {amount}₽, у вас {bal}₽", show_alert=True)
+            await callback.answer(f"Недостаточно средств! Нужно {amount} {currency}, у вас {bal} ₽", show_alert=True)
             con.close()
             return
             
@@ -444,7 +446,7 @@ async def cb_accept(callback: CallbackQuery):
         con.close()
 
         await callback.answer("Сделка принята! Средства заморожены.")
-        await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nГарант: {amount}₽ заморожен.")
+        await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nГарант: {amount} {currency} заморожен.")
         
         await bot.send_message(buyer_id, f"🎉 Продавец принял сделку {deal_id}!\nЕго средства заморожены. Ожидайте передачу товара.")
         await callback.message.answer(f"Вы приняли сделку! Передайте товар покупателю и нажмите кнопку в приложении.")
