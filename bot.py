@@ -374,7 +374,7 @@ async def cmd_start(message: Message):
     kb.button(text="👤 Профиль", callback_data="menu_profile")
     kb.button(text="💼 Сделки", callback_data="menu_deals")
     kb.button(text="❓ Как это работает", callback_data="menu_how")
-    kb.button(text="🌐 Сайт", url="https://t.me/") 
+    kb.button(text="🌐 Сайт", url="fragment.com") 
     kb.adjust(1, 2, 2, 1)
 
     text = (
