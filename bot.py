@@ -253,7 +253,7 @@ async def create_deal_from_app(req: NewDealRequest):
             f"Сумма: {req.amount} {req.currency}\n"
             f"Описание: {req.description}\n"
             f"ID: `{deal_id}`\n\n"
-            f"⚠️ Для принятия сделки на балансе продавца должно быть *{req.amount} ₽* (гарант).\n"
+            f"⚠️ Для принятия сделки на балансе продавца должно быть *{req.amount} {req.currency}* (гарант).\n"
             f"Нажмите кнопку ниже, чтобы принять.",
             parse_mode="Markdown",
             reply_markup=kb.as_markup()
