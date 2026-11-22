@@ -15,7 +15,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, CommandObject, Command
 from aiogram.types import (
     Message, PreCheckoutQuery, SuccessfulPayment, 
-    WebAppInfo, CallbackQuery
+    WebAppInfo, CallbackQuery, FSInputFile  # <-- ДОБАВЛЕН FSInputFile
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -331,16 +331,16 @@ async def cmd_start(message: Message):
         f"⚡ *Автовыплата* — сразу после подтверждения"
     )
     
-    # Отправляем фото вместе с текстом и кнопкой
+    # Отправляем фото вместе с текстом и кнопкой, используя FSInputFile
     try:
-        with open(IMAGE_PATH, "rb") as photo:
-            await bot.send_photo(
-                chat_id=message.chat.id,
-                photo=photo,
-                caption=text,
-                reply_markup=kb.as_markup(),
-                parse_mode="Markdown"
-            )
+        photo = FSInputFile(IMAGE_PATH)
+        await bot.send_photo(
+            chat_id=message.chat.id,
+            photo=photo,
+            caption=text,
+            reply_markup=kb.as_markup(),
+            parse_mode="Markdown"
+        )
     except FileNotFoundError:
         # Если картинка не найдется, отправим просто текст (на всякий случай)
         await message.answer(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
