@@ -23,7 +23,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MINI_APP_URL = os.getenv("MINI_APP_URL", "https://steps1337.github.io/mini-app-fragment/")
-PROXY_URL = os.getenv("PROXY_URL") # Опционально, если нужно вернуть прокси
+PROXY_URL = os.getenv("PROXY_URL") # Опционально
 TIMEOUT_SECONDS = 60
 API_PORT = int(os.getenv("PORT", 8000))
 DB_PATH = os.path.join(os.path.dirname(__file__), "deals.db")
@@ -59,7 +59,8 @@ def db_init():
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             balance REAL DEFAULT 0.0,
-            name TEXT DEFAULT ''
+            name TEXT DEFAULT '',
+            username TEXT DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS deals (
             id           TEXT PRIMARY KEY,
@@ -75,12 +76,12 @@ def db_init():
         );
     """)
     
-    # Миграция для старых баз данных (добавление столбца name)
+    # Миграция: добавляем столбец username, если его нет
     cursor = con.execute("PRAGMA table_info(users)")
     columns = [row[1] for row in cursor.fetchall()]
-    if 'name' not in columns:
-        print("🔧 Обнаружена старая БД. Добавляю столбец 'name'...")
-        con.execute("ALTER TABLE users ADD COLUMN name TEXT DEFAULT ''")
+    if 'username' not in columns:
+        print("🔧 Миграция БД: добавляю столбец 'username'...")
+        con.execute("ALTER TABLE users ADD COLUMN username TEXT DEFAULT ''")
         
     con.commit()
     con.close()
@@ -90,11 +91,16 @@ def db_conn():
     con.row_factory = sqlite3.Row
     return con
 
-def ensure_user(user_id: int, name: str = ""):
+def ensure_user(user_id: int, name: str = "", username: str = ""):
     con = db_conn()
-    con.execute("INSERT OR IGNORE INTO users (user_id, balance, name) VALUES (?, 0.0, ?)", (user_id, name))
+    con.execute(
+        "INSERT OR IGNORE INTO users (user_id, balance, name, username) VALUES (?, 0.0, ?, ?)", 
+        (user_id, name, username)
+    )
     if name:
         con.execute("UPDATE users SET name = ? WHERE user_id = ?", (name, user_id))
+    if username:
+        con.execute("UPDATE users SET username = ? WHERE user_id = ?", (username, user_id))
     con.commit()
     con.close()
 
@@ -135,6 +141,23 @@ async def lifespan(app: FastAPI):
 api = FastAPI(lifespan=lifespan)
 api.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# Поиск ID пользователя по username
+@api.get("/resolve-username")
+async def resolve_username(username: str):
+    clean_username = username.strip().lower()
+    if clean_username.startswith('@'):
+        clean_username = clean_username[1:]
+        
+    con = db_conn()
+    # Ищем в нашей базе пользователей, которые уже запускали бота
+    row = con.execute("SELECT user_id FROM users WHERE LOWER(username) = ?", (clean_username,)).fetchone()
+    con.close()
+    
+    if row:
+        return {"user_id": row["user_id"]}
+    else:
+        raise HTTPException(status_code=404, detail=f"Пользователь @{clean_username} не найден. Он должен сначала запустить бота.")
+
 @api.get("/user")
 async def get_user(user_id: int):
     return {"user_id": user_id, "balance": get_balance(user_id)}
@@ -154,7 +177,13 @@ async def list_deals(user_id: int):
 @api.post("/api/create-deal")
 async def create_deal_from_app(req: NewDealRequest):
     ensure_user(req.buyer_id, req.buyer_name)
-    ensure_user(req.seller_id, "Unknown")
+    # Получаем имя продавца из базы, если он там есть
+    con = db_conn()
+    seller_row = con.execute("SELECT name FROM users WHERE user_id = ?", (req.seller_id,)).fetchone()
+    seller_name = seller_row["name"] if seller_row else "Unknown"
+    con.close()
+    
+    ensure_user(req.seller_id, seller_name)
     
     deal_id = secrets.token_hex(3).upper()
     now = datetime.utcnow().isoformat()
@@ -192,7 +221,7 @@ async def create_deal_from_app(req: NewDealRequest):
         
     return {"status": "ok", "deal_id": deal_id}
 
-# НОВЫЙ ЭНДПОИНТ ДЛЯ ПОДТВЕРЖДЕНИЯ ДЕЙСТВИЙ В СДЕЛКЕ
+# Обработка действий в сделке (Передал / Получил)
 @api.post("/deal/{deal_id}/action")
 async def handle_deal_action(deal_id: str, payload: DealActionIn):
     con = db_conn()
@@ -257,7 +286,9 @@ async def handle_deal_action(deal_id: str, payload: DealActionIn):
 # =========================================================
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    ensure_user(message.from_user.id, message.from_user.first_name)
+    username = message.from_user.username or ""
+    ensure_user(message.from_user.id, message.from_user.first_name, username)
+    
     kb = InlineKeyboardBuilder()
     kb.button(text="🚀 Открыть Fragment", web_app=WebAppInfo(url=MINI_APP_URL))
     kb.adjust(1)
