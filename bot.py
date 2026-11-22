@@ -21,13 +21,39 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.session.aiohttp import AiohttpSession
 
 # --- КОНФИГУРАЦИЯ ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = "9227078546:AAFH8rNb7MDy8EqIQkSv8qZ4UhmdMKzewh0" 
 MINI_APP_URL = os.getenv("MINI_APP_URL", "https://steps1337.github.io/mini-app-fragment/")
-PROXY_URL = os.getenv("PROXY_URL")
 TIMEOUT_SECONDS = 60
 API_PORT = int(os.getenv("PORT", 8000))
 DB_PATH = os.path.join(os.path.dirname(__file__), "deals.db")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+
+# --- ПРОКСИ ---
+# Ваш формат: host:port:login:password
+RAW_PROXY = os.getenv("PROXY_URL", "168.196.238.49:9316:r2nEE7:NA4P02")
+
+# Функция для преобразования формата в URL
+def format_proxy(proxy_str):
+    if not proxy_str:
+        return None
+    # Если уже передан в формате URL (http://... или socks5://...), возвращаем как есть
+    if "://" in proxy_str:
+        return proxy_str
+    
+    # Если формат host:port:login:password
+    parts = proxy_str.split(":")
+    if len(parts) == 4:
+        host, port, login, password = parts
+        # Для HTTP-прокси используем http://
+        return f"http://{login}:{password}@{host}:{port}"
+    
+    # Если просто host:port (без авторизации)
+    if len(parts) == 2:
+        return f"http://{proxy_str}"
+        
+    return proxy_str
+
+PROXY_URL = format_proxy(RAW_PROXY)
 
 # Курсы валют к рублю (сколько рублей стоит 1 единица валюты)
 RATES_TO_RUB = {
@@ -354,7 +380,7 @@ async def handle_deal_action(deal_id: str, payload: DealActionIn):
         new_status = 'delivered'
         notify_text = f"📦 Продавец подтвердил передачу товара по сделке #{deal_id}!\nПроверьте товар и нажмите 'Я получил' в приложении."
 
-    elif payload.action == 'received':
+        elif payload.action == 'received':
         if not is_buyer:
             con.close()
             raise HTTPException(400, "Только покупатель может подтвердить получение")
@@ -364,25 +390,20 @@ async def handle_deal_action(deal_id: str, payload: DealActionIn):
 
         new_status = 'completed'
         
-        # Возвращаем замороженные рубли продавцу
+        # ВМЕСТО РАЗМОРОЗКИ ПРОДАВЦУ — НАЧИСЛЯЕМ ПОКУПАТЕЛЮ
+        # Сумма в рублях, которую мы заморозили у продавца
         amount_in_rub = deal['amount'] * RATES_TO_RUB.get(deal['currency'], 1.0)
-        unfreeze_balance(deal['seller_id'], amount_in_rub) 
         
-        notify_text = f"✅ Сделка #{deal_id} завершена!\nПокупатель подтвердил получение. Гарант разморожен."
+        # Начисляем эти деньги покупателю
+        add_balance(deal['buyer_id'], amount_in_rub)
+        
+        notify_text = f"✅ Сделка #{deal_id} завершена!\nПокупатель подтвердил получение. Средства переведены покупателю."
 
-    else:
-        con.close()
-        raise HTTPException(400, "Неизвестное действие")
-
-    con.execute("UPDATE deals SET status = ? WHERE id = ?", (new_status, deal_id))
-    con.commit()
-    con.close()
-
-    target_id = deal["seller_id"] if is_buyer else deal["buyer_id"]
-    try:
-        await bot.send_message(target_id, notify_text)
-    except:
-        pass
+        # Уведомляем продавца, что сделка завершена (деньги ушли покупателю)
+        try:
+            await bot.send_message(deal['seller_id'], f"✅ Сделка #{deal_id} завершена!\nПокупатель подтвердил получение. Средства переведены покупателю.")
+        except:
+            pass
 
     return {"status": "ok", "new_status": new_status}
 
