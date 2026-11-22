@@ -118,6 +118,28 @@ def add_balance(user_id: int, amount: float):
     con.commit()
     con.close()
 
+# НОВАЯ ЛОГИКА: ЗАМОРОЗКА И РАЗМОРОЗКА СРЕДСТВ
+def freeze_balance(user_id: int, amount: float) -> bool:
+    """Списывает средства (гарант). Возвращает True если успешно."""
+    con = db_conn()
+    row = con.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    if not row or row["balance"] < amount:
+        con.close()
+        return False
+        
+    con.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, user_id))
+    con.commit()
+    con.close()
+    return True
+
+def unfreeze_balance(user_id: int, amount: float):
+    """Возвращает замороженные средства."""
+    ensure_user(user_id)
+    con = db_conn()
+    con.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+    con.commit()
+    con.close()
+
 # =========================================================
 #                  FASTAPI МОДЕЛИ И ЭНДПОИНТЫ
 # =========================================================
@@ -149,7 +171,6 @@ async def resolve_username(username: str):
         clean_username = clean_username[1:]
         
     con = db_conn()
-    # Ищем в нашей базе пользователей, которые уже запускали бота
     row = con.execute("SELECT user_id FROM users WHERE LOWER(username) = ?", (clean_username,)).fetchone()
     con.close()
     
@@ -198,7 +219,8 @@ async def create_deal_from_app(req: NewDealRequest):
         con.commit()
         
         kb = InlineKeyboardBuilder()
-        kb.button(text=f"✅ Принять сделку {deal_id}", callback_data=f"accept_{deal_id}")
+        # Показываем сумму прямо в кнопке для наглядности
+        kb.button(text=f"✅ Принять ({int(req.amount)}₽)", callback_data=f"accept_{deal_id}")
         kb.button(text="❌ Отклонить", callback_data=f"reject_{deal_id}")
         kb.adjust(2)
         
@@ -209,6 +231,7 @@ async def create_deal_from_app(req: NewDealRequest):
             f"Сумма: {req.amount} ₽\n"
             f"Описание: {req.description}\n"
             f"ID: `{deal_id}`\n\n"
+            f"⚠️ Для принятия сделки на вашем балансе должно быть *{req.amount} ₽* (гарант).\n"
             f"Нажмите кнопку ниже, чтобы принять.",
             parse_mode="Markdown",
             reply_markup=kb.as_markup()
@@ -261,9 +284,12 @@ async def handle_deal_action(deal_id: str, payload: DealActionIn):
             raise HTTPException(400, "Сделка не в том статусе для подтверждения")
 
         new_status = 'completed'
-        # Перевод средств продавцу
-        add_balance(deal['partner_id'], deal['amount'])
-        notify_text = f"✅ Сделка #{deal_id} завершена!\nПокупатель подтвердил получение. Средства переведены продавцу."
+        
+        # ВОЗВРАЩАЕМ ЗАМОРОЖЕННЫЕ ДЕНЬГИ ПРОДАВЦУ
+        # Так как сделка прошла успешно, гарант больше не нужен
+        unfreeze_balance(deal['partner_id'], deal['amount']) 
+        
+        notify_text = f"✅ Сделка #{deal_id} завершена!\nПокупатель подтвердил получение. Гарант разморожен."
 
     else:
         con.close()
@@ -310,16 +336,36 @@ async def cb_accept(callback: CallbackQuery):
     con = db_conn()
     deal = con.execute("SELECT * FROM deals WHERE id = ?", (deal_id,)).fetchone()
     
-    if deal and deal["status"] == "pending":
-        con.execute("UPDATE deals SET status = 'active', partner_id = ?, partner_name = ? WHERE id = ?", 
-                    (callback.from_user.id, callback.from_user.first_name, deal_id))
-        con.commit()
-        await callback.answer("Сделка принята!")
-        await callback.message.edit_text(f"✅ Сделка {deal_id} принята! Статус: В работе.")
-        await bot.send_message(deal["owner_id"], f"🎉 Продавец принял сделку {deal_id}!")
-    else:
+    if not deal:
+        await callback.answer("Сделка не найдена", show_alert=True)
+        con.close()
+        return
+
+    if deal["status"] != "pending":
         await callback.answer("Сделка уже обработана", show_alert=True)
+        con.close()
+        return
+
+    # ПРОВЕРКА БАЛАНСА ПРОДАВЦА
+    seller_id = callback.from_user.id
+    amount = deal["amount"]
+    
+    if not freeze_balance(seller_id, amount):
+        bal = get_balance(seller_id)
+        await callback.answer(f"Недостаточно средств! Нужно {amount}₽, у вас {bal}₽", show_alert=True)
+        con.close()
+        return
+
+    # Если баланс есть - принимаем сделку
+    con.execute("UPDATE deals SET status = 'active', partner_id = ?, partner_name = ? WHERE id = ?", 
+                (seller_id, callback.from_user.first_name, deal_id))
+    con.commit()
     con.close()
+    
+    await callback.answer("Сделка принята! Средства заморожены.")
+    await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nГарант: {amount}₽ заморожен.")
+    
+    await bot.send_message(deal["owner_id"], f"🎉 Продавец принял сделку {deal_id}!\nЕго средства заморожены. Можете передавать товар.")
 
 @dp.callback_query(F.data.startswith("reject_"))
 async def cb_reject(callback: CallbackQuery):
