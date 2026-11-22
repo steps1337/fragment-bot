@@ -29,6 +29,15 @@ API_PORT = int(os.getenv("PORT", 8000))
 DB_PATH = os.path.join(os.path.dirname(__file__), "deals.db")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
+# Курсы валют к рублю (сколько рублей стоит 1 единица валюты)
+RATES_TO_RUB = {
+    "RUB": 1.0,
+    "UAH": 2.5,     # Пример
+    "USDT": 90.0,   # Пример
+    "GRAM": 95.0,   # 1 GRAM = 95 руб
+    "STARS": 1.5    # Пример
+}
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("fragment-bot")
 
@@ -246,6 +255,7 @@ async def create_deal_from_app(req: NewDealRequest):
         kb.adjust(2)
         
         role_text = "покупатель" if req.role == 'buyer' else "продавец"
+        rub_amount = req.amount * RATES_TO_RUB.get(req.currency, 1.0)
         await bot.send_message(
             req.partner_id,
             f"💰 *Новая сделка!*\n\n"
@@ -253,7 +263,7 @@ async def create_deal_from_app(req: NewDealRequest):
             f"Сумма: {req.amount} {req.currency}\n"
             f"Описание: {req.description}\n"
             f"ID: `{deal_id}`\n\n"
-            f"⚠️ Для принятия сделки на балансе продавца должно быть *{req.amount} {req.currency}* (гарант).\n"
+            f"⚠️ Для принятия сделки на балансе продавца должно быть *{rub_amount:.2f} ₽* (гарант).\n"
             f"Нажмите кнопку ниже, чтобы принять.",
             parse_mode="Markdown",
             reply_markup=kb.as_markup()
@@ -353,7 +363,11 @@ async def handle_deal_action(deal_id: str, payload: DealActionIn):
             raise HTTPException(400, "Сделка не в том статусе для подтверждения")
 
         new_status = 'completed'
-        unfreeze_balance(deal['seller_id'], deal['amount'])
+        
+        # Возвращаем замороженные рубли продавцу
+        amount_in_rub = deal['amount'] * RATES_TO_RUB.get(deal['currency'], 1.0)
+        unfreeze_balance(deal['seller_id'], amount_in_rub) 
+        
         notify_text = f"✅ Сделка #{deal_id} завершена!\nПокупатель подтвердил получение. Гарант разморожен."
 
     else:
@@ -433,11 +447,13 @@ async def cb_accept(callback: CallbackQuery):
     currency = deal["currency"]
     buyer_id = deal["buyer_id"]
     seller_id = deal["seller_id"]
+    
+    amount_in_rub = amount * RATES_TO_RUB.get(currency, 1.0)
 
     if user_id == seller_id:
-        if not freeze_balance(seller_id, amount):
+        if not freeze_balance(seller_id, amount_in_rub): 
             bal = get_balance(seller_id)
-            await callback.answer(f"Недостаточно средств! Нужно {amount} {currency}, у вас {bal} ₽", show_alert=True)
+            await callback.answer(f"Недостаточно средств! Нужно {amount} {currency} (это {amount_in_rub:.2f} ₽), у вас {bal:.2f} ₽", show_alert=True)
             con.close()
             return
             
@@ -559,7 +575,7 @@ async def cmd_addbal(message: Message, command: CommandObject):
         return
 
     if not command.args:
-        await message.answer("Использование: `/addbal <сумма> <валюта>`\nВалюты: rub, star, ton, usdt", parse_mode="Markdown")
+        await message.answer("Использование: `/addbal <сумма> <валюта>`\nВалюты: rub, uah, usdt, gram, star", parse_mode="Markdown")
         return
 
     parts = command.args.strip().split()
@@ -569,30 +585,22 @@ async def cmd_addbal(message: Message, command: CommandObject):
 
     try:
         amount = float(parts[0].replace(",", "."))
-        currency = parts[1].lower()
+        currency = parts[1].upper()
     except ValueError:
         await message.answer("❌ Неверная сумма.")
         return
 
-    valid_currencies = ["rub", "star", "ton", "usdt"]
-    if currency not in valid_currencies:
-        await message.answer(f"❌ Неизвестная валюта. Доступны: {', '.join(valid_currencies)}")
+    if currency not in RATES_TO_RUB:
+        await message.answer(f"❌ Неизвестная валюта. Доступны: {', '.join(RATES_TO_RUB.keys())}")
         return
 
-    rates_to_rub = {
-        "rub": 1.0,
-        "star": 1.5,
-        "ton": 500.0,
-        "usdt": 90.0
-    }
-    
-    rub_amount = amount * rates_to_rub[currency]
+    rub_amount = amount * RATES_TO_RUB[currency]
     add_balance(message.from_user.id, rub_amount)
     new_bal = get_balance(message.from_user.id)
     
     await message.answer(
-        f"✅ Начислено: *{amount} {currency.upper()}* (эквивалент {rub_amount} ₽).\n"
-        f"Текущий баланс: *{new_bal} ₽*", 
+        f"✅ Начислено: *{amount} {currency}* (эквивалент {rub_amount:.2f} ₽).\n"
+        f"Текущий баланс: *{new_bal:.2f} ₽*", 
         parse_mode="Markdown"
     )
 
@@ -629,7 +637,7 @@ async def cb_menu_profile(callback: CallbackQuery):
     text = (
         f"👤 *Ваш профиль*\n\n"
         f"🆔 ID: `{user_id}`\n"
-        f"💰 Баланс: *{balance} ₽*\n"
+        f"💰 Баланс: *{balance:.2f} ₽*\n"
     )
     await callback.message.answer(text, parse_mode="Markdown")
     await callback.answer()
