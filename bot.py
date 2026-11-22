@@ -69,6 +69,8 @@ def db_init():
             owner_name   TEXT NOT NULL,
             partner_id   INTEGER,
             partner_name TEXT,
+            buyer_id     INTEGER NOT NULL,
+            seller_id    INTEGER NOT NULL,
             role         TEXT NOT NULL,
             amount       REAL NOT NULL,
             description  TEXT,
@@ -199,8 +201,9 @@ async def get_user(user_id: int):
 async def list_deals(user_id: int):
     ensure_user(user_id)
     con = db_conn()
+    # Ищем сделки, где юзер либо покупатель, либо продавец
     rows = con.execute(
-        "SELECT * FROM deals WHERE owner_id = ? OR partner_id = ? ORDER BY created_at DESC",
+        "SELECT * FROM deals WHERE buyer_id = ? OR seller_id = ? ORDER BY created_at DESC",
         (user_id, user_id),
     ).fetchall()
     con.close()
@@ -220,7 +223,6 @@ async def create_deal_from_app(req: NewDealRequest):
     deal_id = secrets.token_hex(3).upper()
     now = datetime.utcnow().isoformat()
     
-    # Определяем роли
     if req.role == 'buyer':
         buyer_id, buyer_name = req.creator_id, req.creator_name
         seller_id, seller_name = req.partner_id, partner_name
@@ -231,9 +233,9 @@ async def create_deal_from_app(req: NewDealRequest):
     con = db_conn()
     try:
         con.execute(
-            """INSERT INTO deals (id, owner_id, owner_name, partner_id, partner_name, role, amount, description, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
-            (deal_id, buyer_id, buyer_name, seller_id, seller_name, 'buyer', req.amount, req.description, now)
+            """INSERT INTO deals (id, owner_id, owner_name, partner_id, partner_name, buyer_id, seller_id, role, amount, description, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'buyer', ?, ?, 'pending', ?)""",
+            (deal_id, buyer_id, buyer_name, seller_id, seller_name, buyer_id, seller_id, req.amount, req.description, now)
         )
         con.commit()
         
@@ -320,8 +322,8 @@ async def handle_deal_action(deal_id: str, payload: DealActionIn):
         con.close()
         raise HTTPException(404, "Сделка не найдена")
 
-    is_buyer = (deal["owner_id"] == payload.user_id)
-    is_seller = (deal["partner_id"] == payload.user_id)
+    is_buyer = (deal["buyer_id"] == payload.user_id)
+    is_seller = (deal["seller_id"] == payload.user_id)
 
     if not is_buyer and not is_seller:
         con.close()
@@ -350,7 +352,7 @@ async def handle_deal_action(deal_id: str, payload: DealActionIn):
             raise HTTPException(400, "Сделка не в том статусе для подтверждения")
 
         new_status = 'completed'
-        unfreeze_balance(deal['partner_id'], deal['amount'])
+        unfreeze_balance(deal['seller_id'], deal['amount'])
         notify_text = f"✅ Сделка #{deal_id} завершена!\nПокупатель подтвердил получение. Гарант разморожен."
 
     else:
@@ -361,7 +363,7 @@ async def handle_deal_action(deal_id: str, payload: DealActionIn):
     con.commit()
     con.close()
 
-    target_id = deal["partner_id"] if is_buyer else deal["owner_id"]
+    target_id = deal["seller_id"] if is_buyer else deal["buyer_id"]
     try:
         await bot.send_message(target_id, notify_text)
     except:
@@ -425,32 +427,42 @@ async def cb_accept(callback: CallbackQuery):
         con.close()
         return
 
-    seller_id = callback.from_user.id
+    user_id = callback.from_user.id
     amount = deal["amount"]
+    buyer_id = deal["buyer_id"]
+    seller_id = deal["seller_id"]
 
-    if not freeze_balance(seller_id, amount):
-        bal = get_balance(seller_id)
-        await callback.answer(f"Недостаточно средств! Нужно {amount}₽, у вас {bal}₽", show_alert=True)
+    if user_id == seller_id:
+        if not freeze_balance(seller_id, amount):
+            bal = get_balance(seller_id)
+            await callback.answer(f"Недостаточно средств! Нужно {amount}₽, у вас {bal}₽", show_alert=True)
+            con.close()
+            return
+            
+        con.execute("UPDATE deals SET status = 'active' WHERE id = ?", (deal_id,))
+        con.commit()
         con.close()
-        return
 
-    con.execute("UPDATE deals SET status = 'active', partner_id = ?, partner_name = ? WHERE id = ?",
-                (seller_id, callback.from_user.first_name, deal_id))
-    con.commit()
-    con.close()
-
-    await callback.answer("Сделка принята! Средства заморожены.")
-    await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nГарант: {amount}₽ заморожен.")
-    
-    creator_id = deal["owner_id"]
-    creator_is_buyer = (deal["role"] == 'buyer')
-
-    if creator_is_buyer:
-        await bot.send_message(creator_id, f"🎉 Продавец принял сделку {deal_id}!\nЕго средства заморожены. Ожидайте передачу товара.")
+        await callback.answer("Сделка принята! Средства заморожены.")
+        await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nГарант: {amount}₽ заморожен.")
+        
+        await bot.send_message(buyer_id, f"🎉 Продавец принял сделку {deal_id}!\nЕго средства заморожены. Ожидайте передачу товара.")
         await callback.message.answer(f"Вы приняли сделку! Передайте товар покупателю и нажмите кнопку в приложении.")
-    else:
-        await bot.send_message(creator_id, f"🎉 Покупатель принял сделку {deal_id}!\nМожете передавать товар.")
+
+    elif user_id == buyer_id:
+        con.execute("UPDATE deals SET status = 'active' WHERE id = ?", (deal_id,))
+        con.commit()
+        con.close()
+
+        await callback.answer("Сделка принята! Ожидайте передачу.")
+        await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.")
+        
+        await bot.send_message(seller_id, f"🎉 Покупатель принял сделку {deal_id}!\nМожете передавать товар.")
         await callback.message.answer(f"Вы приняли сделку! Ожидайте передачу товара от продавца.")
+        
+    else:
+        await callback.answer("Вы не являетесь участником этой сделки", show_alert=True)
+        con.close()
 
 @dp.callback_query(F.data.startswith("reject_"))
 async def cb_reject(callback: CallbackQuery):
