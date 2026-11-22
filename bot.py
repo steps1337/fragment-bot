@@ -23,11 +23,11 @@ from aiogram.client.session.aiohttp import AiohttpSession
 # --- КОНФИГУРАЦИЯ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MINI_APP_URL = os.getenv("MINI_APP_URL", "https://steps1337.github.io/mini-app-fragment/")
-PROXY_URL = os.getenv("PROXY_URL")  # Опционально
+PROXY_URL = os.getenv("PROXY_URL")
 TIMEOUT_SECONDS = 60
 API_PORT = int(os.getenv("PORT", 8000))
 DB_PATH = os.path.join(os.path.dirname(__file__), "deals.db")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # Ваш Telegram ID
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("fragment-bot")
@@ -86,7 +86,6 @@ def db_init():
         );
     """)
 
-    # Миграция: добавляем столбец username, если его нет
     cursor = con.execute("PRAGMA table_info(users)")
     columns = [row[1] for row in cursor.fetchall()]
     if 'username' not in columns:
@@ -371,7 +370,12 @@ async def cmd_start(message: Message):
 
     kb = InlineKeyboardBuilder()
     kb.button(text="🚀 Открыть Fragment", web_app=WebAppInfo(url=MINI_APP_URL))
-    kb.adjust(1)
+    kb.button(text="💳 Кошелёк", callback_data="menu_wallet")
+    kb.button(text="👤 Профиль", callback_data="menu_profile")
+    kb.button(text="💼 Сделки", callback_data="menu_deals")
+    kb.button(text="❓ Как это работает", callback_data="menu_how")
+    kb.button(text="🌐 Сайт", url="https://t.me/") 
+    kb.adjust(1, 2, 2, 1)
 
     text = (
         f"💎 *FRAGMENT · безопасная биржа*\n\n"
@@ -514,13 +518,10 @@ async def cmd_code(message: Message, command: CommandObject):
         admin_sessions.add(message.from_user.id)
         await message.answer("✅ Доступ разрешен! Теперь вы можете выдавать баланс.\n\nПример: `/addbal 1000 rub`", parse_mode="Markdown")
     else:
-        # Если код неверный, можно ничего не отвечать, либо ответить ошибкой. 
-        # Оставим ответ для удобства.
         await message.answer("❌ Неверный код.")
 
 @dp.message(Command("addbal"))
 async def cmd_addbal(message: Message, command: CommandObject):
-    # Если пользователя нет в списке, просто игнорируем команду
     if message.from_user.id not in admin_sessions:
         return
 
@@ -561,6 +562,51 @@ async def cmd_addbal(message: Message, command: CommandObject):
         f"Текущий баланс: *{new_bal} ₽*", 
         parse_mode="Markdown"
     )
+
+# --- ОБРАБОТЧИКИ КНОПОК МЕНЮ ---
+
+@dp.callback_query(F.data == "menu_how")
+async def cb_menu_how(callback: CallbackQuery):
+    text = (
+        "📘 *Как работает Fragment*\n"
+        "――――――――――――――――――――――――――――\n"
+        "1. 🤝 Продавец или покупатель создаёт сделку\n"
+        "2. 💳 Покупатель платит — деньги замораживаются у сервиса\n"
+        "3. 📦 Продавец передаёт товар в чате сделки\n"
+        "4. ✅ Покупатель проверяет и подтверждает сделку\n"
+        "――――――――――――――――――――――――――――\n"
+        "🔒 Спор в любой момент — подключится модератор.\n"
+        "💰 Комиссия сервиса — 12,5%, платит покупатель сверху.\n"
+        "⚠️ Никогда не переводите деньги «напрямую» мимо сделки."
+    )
+    await callback.message.answer(text, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "menu_wallet")
+async def cb_menu_wallet(callback: CallbackQuery):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🚀 Открыть кошелёк", web_app=WebAppInfo(url=MINI_APP_URL))
+    await callback.message.answer("💳 *Ваш кошелёк*\n\nПополнение, вывод и баланс доступны в мини-приложении.", parse_mode="Markdown", reply_markup=kb.as_markup())
+    await callback.answer()
+
+@dp.callback_query(F.data == "menu_profile")
+async def cb_menu_profile(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    balance = get_balance(user_id)
+    text = (
+        f"👤 *Ваш профиль*\n\n"
+        f"🆔 ID: `{user_id}`\n"
+        f"💰 Баланс: *{balance} ₽*\n"
+    )
+    await callback.message.answer(text, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "menu_deals")
+async def cb_menu_deals(callback: CallbackQuery):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🚀 Мои сделки", web_app=WebAppInfo(url=MINI_APP_URL))
+    await callback.message.answer("💼 *Ваши сделки*\n\nВсе активные и завершенные сделки доступны в мини-приложении.", parse_mode="Markdown", reply_markup=kb.as_markup())
+    await callback.answer()
 
 @dp.pre_checkout_query()
 async def process_pre_checkout(query: PreCheckoutQuery):
