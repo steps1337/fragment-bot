@@ -7,49 +7,41 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, CommandObject, Command
 from aiogram.types import (
-    InlineKeyboardMarkup,
-    Message,
-    PreCheckoutQuery,
-    SuccessfulPayment,
-    WebAppInfo,
-    CallbackQuery
+    Message, PreCheckoutQuery, SuccessfulPayment, 
+    WebAppInfo, CallbackQuery
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.session.aiohttp import AiohttpSession
 
 # --- КОНФИГУРАЦИЯ ---
-BOT_TOKEN = os.getenv("BOT_TOKEN", "9237220562:AAHS9DEADCLpupc3CkkyeYXMl4F-J4Z0jLs")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 MINI_APP_URL = os.getenv("MINI_APP_URL", "https://steps1337.github.io/mini-app-fragment/")
-PROXY_URL = "http://r2nEE7:NA4P02@168.196.238.49:9316"
-
-API_HOST = "0.0.0.0"
-API_PORT = int(os.getenv("PORT", 8000)) # Render использует PORT, по дефолту 8000
+PROXY_URL = os.getenv("PROXY_URL") # Опционально, если нужно вернуть прокси
+TIMEOUT_SECONDS = 60
+API_PORT = int(os.getenv("PORT", 8000))
 DB_PATH = os.path.join(os.path.dirname(__file__), "deals.db")
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("fragment-bot")
 
 # =========================================================
-#                  НАСТРОЙКА БОТА И ПРОКСИ
+#                  НАСТРОЙКА БОТА И СЕССИИ
 # =========================================================
-PROXY_URL = os.getenv("PROXY_URL") # Берем из переменных окружения
-TIMEOUT_SECONDS = 60 # <-- ВОТ ЭТОЙ СТРОКИ НЕ ХВАТАЛО!
-
-if PROXY_URL:
-    print(f"🔄 Инициализация сессии через прокси: {PROXY_URL}")
-    session = AiohttpSession(proxy=PROXY_URL, timeout=TIMEOUT_SECONDS)
-else:
-    print("✅ Инициализация сессии без прокси (прямое соединение).")
-    session = AiohttpSession(timeout=TIMEOUT_SECONDS)
-
 try:
+    if PROXY_URL:
+        print(f"🔄 Инициализация сессии через прокси: {PROXY_URL}")
+        session = AiohttpSession(proxy=PROXY_URL, timeout=TIMEOUT_SECONDS)
+    else:
+        print("✅ Инициализация сессии без прокси (прямое соединение).")
+        session = AiohttpSession(timeout=TIMEOUT_SECONDS)
+        
     bot = Bot(token=BOT_TOKEN, session=session)
     print("✅ Бот успешно инициализирован.")
 except Exception as e:
@@ -121,26 +113,18 @@ def add_balance(user_id: int, amount: float):
     con.close()
 
 # =========================================================
-#                  FastAPI (backend)
+#                  FASTAPI МОДЕЛИ И ЭНДПОИНТЫ
 # =========================================================
-class CreateDealIn(BaseModel):
-    owner_id: int
-    owner_name: str
-    role: str
-    amount: float
-    description: str = ""
-
-class AcceptDealIn(BaseModel):
-    partner_id: int
-    partner_name: str
-
-# Модель для новой логики создания сделки через "+" в Mini App
 class NewDealRequest(BaseModel):
     buyer_id: int
     buyer_name: str
     seller_id: int
     amount: float
     description: str = ""
+
+class DealActionIn(BaseModel):
+    user_id: int
+    action: str  # 'delivered' или 'received'
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -149,13 +133,7 @@ async def lifespan(app: FastAPI):
     await bot.session.close()
 
 api = FastAPI(lifespan=lifespan)
-api.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
-)
-
-@api.get("/")
-async def root():
-    return {"status": "ok"}
+api.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 @api.get("/user")
 async def get_user(user_id: int):
@@ -172,10 +150,9 @@ async def list_deals(user_id: int):
     con.close()
     return [dict(r) for r in rows]
 
-# НОВЫЙ ЭНДПОИНТ ДЛЯ СОЗДАНИЯ СДЕЛКИ ЧЕРЕЗ MINI APP (+)
+# Создание сделки через Mini App (+)
 @api.post("/api/create-deal")
 async def create_deal_from_app(req: NewDealRequest):
-    """Создает сделку и отправляет уведомление продавцу"""
     ensure_user(req.buyer_id, req.buyer_name)
     ensure_user(req.seller_id, "Unknown")
     
@@ -184,7 +161,6 @@ async def create_deal_from_app(req: NewDealRequest):
     
     con = db_conn()
     try:
-        # Сохраняем сделку в БД (role='buyer' т.к. создает покупатель)
         con.execute(
             """INSERT INTO deals (id, owner_id, owner_name, partner_id, role, amount, description, status, created_at)
                VALUES (?, ?, ?, ?, 'buyer', ?, ?, 'pending', ?)""",
@@ -192,7 +168,6 @@ async def create_deal_from_app(req: NewDealRequest):
         )
         con.commit()
         
-        # Отправляем уведомление ПРОДАВЦУ в Telegram
         kb = InlineKeyboardBuilder()
         kb.button(text=f"✅ Принять сделку {deal_id}", callback_data=f"accept_{deal_id}")
         kb.button(text="❌ Отклонить", callback_data=f"reject_{deal_id}")
@@ -217,92 +192,75 @@ async def create_deal_from_app(req: NewDealRequest):
         
     return {"status": "ok", "deal_id": deal_id}
 
-@api.post("/deal")
-async def create_deal(payload: CreateDealIn):
-    ensure_user(payload.owner_id)
-    if payload.amount <= 0:
-        raise HTTPException(400, "Сумма должна быть больше 0")
-
-    if payload.role == 'buyer' and get_balance(payload.owner_id) < payload.amount:
-        raise HTTPException(400, "Недостаточно средств на балансе")
-
-    deal_id = secrets.token_hex(3).upper()
+# НОВЫЙ ЭНДПОИНТ ДЛЯ ПОДТВЕРЖДЕНИЯ ДЕЙСТВИЙ В СДЕЛКЕ
+@api.post("/deal/{deal_id}/action")
+async def handle_deal_action(deal_id: str, payload: DealActionIn):
     con = db_conn()
-    con.execute(
-        """INSERT INTO deals (id, owner_id, owner_name, role, amount, description, status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)""",
-        (deal_id, payload.owner_id, payload.owner_name, payload.role, payload.amount,
-         payload.description, datetime.utcnow().isoformat()),
-    )
-    con.commit()
-    con.close()
-
-    try:
-        await bot.send_message(payload.owner_id, f"✅ *Сделка создана*\nID: `{deal_id}`\nСумма: {payload.amount} ₽", parse_mode="Markdown")
-    except Exception:
-        pass
-
-    return {"id": deal_id, "status": "pending"}
-
-@api.post("/deal/{deal_id}/accept")
-async def accept_deal(deal_id: str, payload: AcceptDealIn):
-    ensure_user(payload.partner_id)
-    con = db_conn()
-    row = con.execute("SELECT * FROM deals WHERE id = ?", (deal_id,)).fetchone()
-    if not row:
+    deal = con.execute("SELECT * FROM deals WHERE id = ?", (deal_id,)).fetchone()
+    
+    if not deal:
         con.close()
         raise HTTPException(404, "Сделка не найдена")
-    if row["owner_id"] == payload.partner_id:
+        
+    is_buyer = (deal["owner_id"] == payload.user_id)
+    is_seller = (deal["partner_id"] == payload.user_id)
+    
+    if not is_buyer and not is_seller:
         con.close()
-        raise HTTPException(400, "Нельзя принять свою сделку")
-    if row["status"] != "pending":
-        con.close()
-        raise HTTPException(400, "Сделка уже принята")
+        raise HTTPException(403, "У вас нет доступа к этой сделке")
 
-    con.execute("UPDATE deals SET partner_id = ?, partner_name = ?, status = 'active' WHERE id = ?", (payload.partner_id, payload.partner_name, deal_id))
+    new_status = deal["status"]
+    notify_text = ""
+
+    if payload.action == 'delivered':
+        if not is_seller:
+            con.close()
+            raise HTTPException(400, "Только продавец может подтвердить передачу")
+        if deal["status"] != 'active':
+            con.close()
+            raise HTTPException(400, "Невозможно выполнить действие (статус не active)")
+            
+        new_status = 'delivered'
+        notify_text = f"📦 Продавец подтвердил передачу товара по сделке #{deal_id}!\nПроверьте товар и нажмите 'Я получил' в приложении."
+
+    elif payload.action == 'received':
+        if not is_buyer:
+            con.close()
+            raise HTTPException(400, "Только покупатель может подтвердить получение")
+        if deal["status"] not in ['active', 'delivered']:
+            con.close()
+            raise HTTPException(400, "Сделка не в том статусе для подтверждения")
+
+        new_status = 'completed'
+        # Перевод средств продавцу
+        add_balance(deal['partner_id'], deal['amount'])
+        notify_text = f"✅ Сделка #{deal_id} завершена!\nПокупатель подтвердил получение. Средства переведены продавцу."
+
+    else:
+        con.close()
+        raise HTTPException(400, "Неизвестное действие")
+
+    con.execute("UPDATE deals SET status = ? WHERE id = ?", (new_status, deal_id))
     con.commit()
     con.close()
 
+    target_id = deal["partner_id"] if is_buyer else deal["owner_id"]
     try:
-        await bot.send_message(row["owner_id"], f"🤝 *Сделка {deal_id} принята!*", parse_mode="Markdown")
-    except Exception:
+        await bot.send_message(target_id, notify_text)
+    except:
         pass
 
-    return {"id": deal_id, "status": "active"}
+    return {"status": "ok", "new_status": new_status}
 
 # =========================================================
-#                        БОТ (ОБНОВЛЕННОЕ МЕНЮ)
+#                  AIORAM HANDLERS (БОТ)
 # =========================================================
-
-def get_main_keyboard() -> InlineKeyboardMarkup:
-    builder = InlineKeyboardBuilder()
-    
-    builder.button(text="🚀 Открыть Fragment", web_app=WebAppInfo(url=MINI_APP_URL))
-    builder.button(text="💳 Кошелёк", callback_data="wallet")
-    builder.button(text="👤 Профиль", callback_data="profile_info")
-    builder.button(text="💼 Сделки", callback_data="my_deals")
-    builder.button(text="❓ Как это работает", callback_data="how_it_works")
-    builder.button(text="🌐 Сайт", url="https://fragment.com")
-    
-    builder.adjust(1, 2, 2, 1)
-    return builder.as_markup()
-
-HOW_IT_WORKS_TEXT = (
-    "📘 *Как работает Fragment*\n"
-    "━━━━━━━━━━━━━━━━━━━━\n"
-    "1. 🤝 *Продавец или покупатель создаёт сделку*\n"
-    "2. 💳 *Покупатель платит* — деньги замораживаются у сервиса\n"
-    "3. 📦 *Продавец передаёт товар* в чате сделки\n"
-    "4. ✅ *Покупатель проверяет и подтверждает сделку*\n"
-    "━━━━━━━━━━━━━━━━━━━━\n"
-    "🔒 *Спор в любой момент* — подключится модератор.\n"
-    "💰 *Комиссия сервиса* — 12,5%, платит покупатель сверху.\n"
-    "⚠️ *Никогда не переводите деньги «напрямую» мимо сделки.*"
-)
-
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     ensure_user(message.from_user.id, message.from_user.first_name)
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🚀 Открыть Fragment", web_app=WebAppInfo(url=MINI_APP_URL))
+    kb.adjust(1)
     
     text = (
         f"💎 *FRAGMENT · безопасная биржа*\n\n"
@@ -313,57 +271,8 @@ async def cmd_start(message: Message):
         f"⚡ *Автовыплата* — сразу после подтверждения"
     )
     
-    await message.answer(
-        text,
-        reply_markup=get_main_keyboard(),
-        parse_mode="Markdown",
-    )
+    await message.answer(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
 
-@dp.callback_query(F.data == "how_it_works")
-async def cb_how_it_works(callback: CallbackQuery):
-    await callback.message.answer(
-        HOW_IT_WORKS_TEXT,
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard()
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "wallet")
-async def cb_wallet(callback: CallbackQuery):
-    bal = get_balance(callback.from_user.id)
-    await callback.message.answer(
-        f"💳 *Ваш кошелёк*\n\n"
-        f"Текущий баланс: *{bal:,.2f} ₽*\n\n"
-        f"Для пополнения или вывода средств откройте Mini App.",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard()
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "profile_info")
-async def cb_profile(callback: CallbackQuery):
-    await callback.message.answer(
-        f"👤 *Ваш профиль*\n\n"
-        f"Имя: {callback.from_user.full_name}\n"
-        f"ID: `{callback.from_user.id}`\n"
-        f"Уровень: 1\n\n"
-        f"Более подробная статистика доступна в Mini App.",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard()
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "my_deals")
-async def cb_my_deals(callback: CallbackQuery):
-    await callback.message.answer(
-        "💼 *Мои сделки*\n\n"
-        "Все активные и завершенные сделки отображаются во встроенном приложении.",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard()
-    )
-    await callback.answer()
-
-# Обработчики кнопок принятия/отклонения сделки из уведомления
 @dp.callback_query(F.data.startswith("accept_"))
 async def cb_accept(callback: CallbackQuery):
     deal_id = callback.data.split("_")[1]
@@ -397,23 +306,18 @@ async def cb_reject(callback: CallbackQuery):
 @dp.message(Command("promo"))
 async def cmd_promo(message: Message, command: CommandObject):
     ensure_user(message.from_user.id)
-    if not command.args:
-        return
+    if not command.args: return
 
     code = command.args.strip().upper()
-    PROMO_CODES = {
-        "START100": 100.0,
-        "FRAGMENT500": 500.0,
-        "STARS1000": 1000.0
-    }
+    PROMO_CODES = {"START100": 100.0, "FRAGMENT500": 500.0, "STARS1000": 1000.0}
 
     if code in PROMO_CODES:
         amount = PROMO_CODES[code]
         add_balance(message.from_user.id, amount)
         PROMO_CODES.pop(code, None) 
-        await message.answer(f"✅ *Код успешно активирован!*\n\nВам начислено: **{amount} ₽**", parse_mode="Markdown")
+        await message.answer(f"✅ *Код активирован!* Начислено: **{amount} ₽**", parse_mode="Markdown")
     else:
-        await message.answer("❌ Неверный или уже использованный промокод.")
+        await message.answer("❌ Неверный или использованный промокод.")
 
 @dp.pre_checkout_query()
 async def process_pre_checkout(query: PreCheckoutQuery):
@@ -421,13 +325,13 @@ async def process_pre_checkout(query: PreCheckoutQuery):
 
 @dp.message(F.successful_payment)
 async def process_successful_payment(message: Message, successful_payment: SuccessfulPayment):
-    await message.answer(f"✅ *Оплата прошла успешно!*\nСумма: {successful_payment.total_amount} {successful_payment.currency}", parse_mode="Markdown")
+    await message.answer(f"✅ *Оплата прошла!* Сумма: {successful_payment.total_amount} {successful_payment.currency}", parse_mode="Markdown")
 
 # =========================================================
 #                     ЗАПУСК
 # =========================================================
 async def run_api():
-    config = uvicorn.Config(api, host=API_HOST, port=API_PORT, log_level="info")
+    config = uvicorn.Config(api, host="0.0.0.0", port=API_PORT, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
 
