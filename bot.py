@@ -150,11 +150,12 @@ def unfreeze_balance(user_id: int, amount: float):
 #                  FASTAPI МОДЕЛИ И ЭНДПОИНТЫ
 # =========================================================
 class NewDealRequest(BaseModel):
-    buyer_id: int
-    buyer_name: str
-    seller_id: int
+    creator_id: int
+    creator_name: str
+    partner_id: int
     amount: float
     description: str = ""
+    role: str # 'buyer' или 'seller'
 
 class DealActionIn(BaseModel):
     user_id: int
@@ -207,39 +208,47 @@ async def list_deals(user_id: int):
 
 @api.post("/api/create-deal")
 async def create_deal_from_app(req: NewDealRequest):
-    ensure_user(req.buyer_id, req.buyer_name)
+    ensure_user(req.creator_id, req.creator_name)
+    
     con = db_conn()
-    seller_row = con.execute("SELECT name FROM users WHERE user_id = ?", (req.seller_id,)).fetchone()
-    seller_name = seller_row["name"] if seller_row else "Unknown"
+    partner_row = con.execute("SELECT name FROM users WHERE user_id = ?", (req.partner_id,)).fetchone()
+    partner_name = partner_row["name"] if partner_row else "Unknown"
     con.close()
-
-    ensure_user(req.seller_id, seller_name)
-
+    
+    ensure_user(req.partner_id, partner_name)
+    
     deal_id = secrets.token_hex(3).upper()
     now = datetime.utcnow().isoformat()
+    
+    if req.role == 'buyer':
+        buyer_id, buyer_name = req.creator_id, req.creator_name
+        seller_id, seller_name = req.partner_id, partner_name
+    else:
+        seller_id, seller_name = req.creator_id, req.creator_name
+        buyer_id, buyer_name = req.partner_id, partner_name
 
     con = db_conn()
     try:
         con.execute(
-            """INSERT INTO deals (id, owner_id, owner_name, partner_id, role, amount, description, status, created_at)
-               VALUES (?, ?, ?, ?, 'buyer', ?, ?, 'pending', ?)""",
-            (deal_id, req.buyer_id, req.buyer_name, req.seller_id, req.amount, req.description, now)
+            """INSERT INTO deals (id, owner_id, owner_name, partner_id, partner_name, role, amount, description, status, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)""",
+            (deal_id, buyer_id, buyer_name, seller_id, seller_name, 'buyer', req.amount, req.description, now)
         )
         con.commit()
-
+        
         kb = InlineKeyboardBuilder()
         kb.button(text=f"✅ Принять ({int(req.amount)}₽)", callback_data=f"accept_{deal_id}")
         kb.button(text="❌ Отклонить", callback_data=f"reject_{deal_id}")
         kb.adjust(2)
-
+        
         await bot.send_message(
-            req.seller_id,
+            req.partner_id,
             f"💰 *Новая сделка!*\n\n"
-            f"Покупатель: {req.buyer_name}\n"
+            f"Создатель: {req.creator_name} ({'покупатель' if req.role == 'buyer' else 'продавец'})\n"
             f"Сумма: {req.amount} ₽\n"
             f"Описание: {req.description}\n"
             f"ID: `{deal_id}`\n\n"
-            f"⚠️ Для принятия сделки на вашем балансе должно быть *{req.amount} ₽* (гарант).\n"
+            f"⚠️ Для принятия сделки продавцу нужно иметь *{req.amount} ₽* (гарант).\n"
             f"Нажмите кнопку ниже, чтобы принять.",
             parse_mode="Markdown",
             reply_markup=kb.as_markup()
@@ -249,7 +258,7 @@ async def create_deal_from_app(req: NewDealRequest):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         con.close()
-
+        
     return {"status": "ok", "deal_id": deal_id}
 
 @api.post("/api/withdraw")
@@ -374,7 +383,7 @@ async def cmd_start(message: Message):
     kb.button(text="👤 Профиль", callback_data="menu_profile")
     kb.button(text="💼 Сделки", callback_data="menu_deals")
     kb.button(text="❓ Как это работает", callback_data="menu_how")
-    kb.button(text="🌐 Сайт", url="fragment.com") 
+    kb.button(text="🌐 Сайт", url="https://fragment.com") 
     kb.adjust(1, 2, 2, 1)
 
     text = (
