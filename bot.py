@@ -155,7 +155,7 @@ class NewDealRequest(BaseModel):
     partner_id: int
     amount: float
     description: str = ""
-    role: str # 'buyer' или 'seller'
+    role: str 
 
 class DealActionIn(BaseModel):
     user_id: int
@@ -220,6 +220,7 @@ async def create_deal_from_app(req: NewDealRequest):
     deal_id = secrets.token_hex(3).upper()
     now = datetime.utcnow().isoformat()
     
+    # Определяем роли
     if req.role == 'buyer':
         buyer_id, buyer_name = req.creator_id, req.creator_name
         seller_id, seller_name = req.partner_id, partner_name
@@ -241,14 +242,15 @@ async def create_deal_from_app(req: NewDealRequest):
         kb.button(text="❌ Отклонить", callback_data=f"reject_{deal_id}")
         kb.adjust(2)
         
+        role_text = "покупатель" if req.role == 'buyer' else "продавец"
         await bot.send_message(
             req.partner_id,
             f"💰 *Новая сделка!*\n\n"
-            f"Создатель: {req.creator_name} ({'покупатель' if req.role == 'buyer' else 'продавец'})\n"
+            f"Создатель: {req.creator_name} ({role_text})\n"
             f"Сумма: {req.amount} ₽\n"
             f"Описание: {req.description}\n"
             f"ID: `{deal_id}`\n\n"
-            f"⚠️ Для принятия сделки продавцу нужно иметь *{req.amount} ₽* (гарант).\n"
+            f"⚠️ Для принятия сделки на балансе продавца должно быть *{req.amount} ₽* (гарант).\n"
             f"Нажмите кнопку ниже, чтобы принять.",
             parse_mode="Markdown",
             reply_markup=kb.as_markup()
@@ -439,8 +441,16 @@ async def cb_accept(callback: CallbackQuery):
 
     await callback.answer("Сделка принята! Средства заморожены.")
     await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nГарант: {amount}₽ заморожен.")
+    
+    creator_id = deal["owner_id"]
+    creator_is_buyer = (deal["role"] == 'buyer')
 
-    await bot.send_message(deal["owner_id"], f"🎉 Продавец принял сделку {deal_id}!\nЕго средства заморожены. Можете передавать товар.")
+    if creator_is_buyer:
+        await bot.send_message(creator_id, f"🎉 Продавец принял сделку {deal_id}!\nЕго средства заморожены. Ожидайте передачу товара.")
+        await callback.message.answer(f"Вы приняли сделку! Передайте товар покупателю и нажмите кнопку в приложении.")
+    else:
+        await bot.send_message(creator_id, f"🎉 Покупатель принял сделку {deal_id}!\nМожете передавать товар.")
+        await callback.message.answer(f"Вы приняли сделку! Ожидайте передачу товара от продавца.")
 
 @dp.callback_query(F.data.startswith("reject_"))
 async def cb_reject(callback: CallbackQuery):
