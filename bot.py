@@ -315,6 +315,9 @@ async def cmd_start(message: Message):
     username = message.from_user.username or ""
     ensure_user(message.from_user.id, message.from_user.first_name, username)
     
+    # Путь к картинке (должен лежать рядом с bot.py)
+    IMAGE_PATH = "start_image.jpg" 
+    
     kb = InlineKeyboardBuilder()
     kb.button(text="🚀 Открыть Fragment", web_app=WebAppInfo(url=MINI_APP_URL))
     kb.adjust(1)
@@ -328,8 +331,20 @@ async def cmd_start(message: Message):
         f"⚡ *Автовыплата* — сразу после подтверждения"
     )
     
-    await message.answer(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
-
+    # Отправляем фото вместе с текстом и кнопкой
+    try:
+        with open(IMAGE_PATH, "rb") as photo:
+            await bot.send_photo(
+                chat_id=message.chat.id,
+                photo=photo,
+                caption=text,
+                reply_markup=kb.as_markup(),
+                parse_mode="Markdown"
+            )
+    except FileNotFoundError:
+        # Если картинка не найдется, отправим просто текст (на всякий случай)
+        await message.answer(text, reply_markup=kb.as_markup(), parse_mode="Markdown")
+        
 @dp.callback_query(F.data.startswith("accept_"))
 async def cb_accept(callback: CallbackQuery):
     deal_id = callback.data.split("_")[1]
