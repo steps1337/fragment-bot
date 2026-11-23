@@ -486,40 +486,46 @@ async def cb_accept(callback: CallbackQuery):
     currency = deal["currency"]
     buyer_id = deal["buyer_id"]
     seller_id = deal["seller_id"]
+    owner_id = deal["owner_id"] # ID создателя сделки
     
     amount_in_rub = amount * RATES_TO_RUB.get(currency, 1.0)
 
-    # ЕСЛИ НАЖАЛ ПОКУПАТЕЛЬ - ОН НЕ МОЖЕТ ПРИНЯТЬ СВОЮ ЖЕ СДЕЛКУ
-    if user_id == buyer_id:
-        await callback.answer("Вы создатель этой сделки (покупатель). Ждите, пока продавец её примет.", show_alert=True)
+    # ПРОВЕРКА: ЕСЛИ НАЖАЛ СОЗДАТЕЛЬ, ОН НЕ МОЖЕТ ПРИНЯТЬ СВОЮ ЖЕ СДЕЛКУ
+    if user_id == owner_id:
+        await callback.answer("Вы создатель этой сделки. Ждите, пока вторая сторона её примет.", show_alert=True)
         con.close()
         return
 
-    # ЕСЛИ НАЖАЛ ПРОДАВЕЦ - ПРОСТО ПРИНИМАЕМ, НО ПРОВЕРЯЕМ БАЛАНС ПОКУПАТЕЛЯ
-    if user_id == seller_id:
-        # Проверяем, что у покупателя (создателя) есть средства
-        if not freeze_balance(buyer_id, amount_in_rub):
-            bal = get_balance(buyer_id)
-            await callback.answer(f"❌ У покупателя недостаточно средств!\nНужно: {amount} {currency} ({amount_in_rub:.2f} ₽)\nУ него: {bal:.2f} ₽", show_alert=True)
-            con.close()
-            return
-
-        con.execute("UPDATE deals SET status = 'active' WHERE id = ?", (deal_id,))
-        con.commit()
+    # ЕСЛИ НАЖАЛ НЕ СОЗДАТЕЛЬ, ЗНАЧИТ ЭТО ВТОРАЯ СТОРОНА, ОН МОЖЕТ ПРИНЯТЬ
+    # Проверяем, что у покупателя есть средства для заморозки
+    if not freeze_balance(buyer_id, amount_in_rub):
+        bal = get_balance(buyer_id)
+        await callback.answer(f"❌ У покупателя недостаточно средств!\nНужно: {amount} {currency} ({amount_in_rub:.2f} ₽)\nУ него: {bal:.2f} ₽", show_alert=True)
         con.close()
+        return
 
-        await callback.answer("Сделка принята!")
-        await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nГарант: {amount} {currency} заморожен у покупателя.")
+    # АКТИВИРУЕМ СДЕЛКУ
+    con.execute("UPDATE deals SET status = 'active' WHERE id = ?", (deal_id,))
+    con.commit()
+    con.close()
+
+    await callback.answer("Сделка принята! Средства покупателя заморожены.")
+    await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nГарант: {amount} {currency} заморожен у покупателя.")
+    
+    # РАЗДЕЛЯЕМ УВЕДОМЛЕНИЯ В ЗАВИСИМОСТИ ОТ РОЛИ ТОГО, КТО НАЖАЛ
+    if user_id == buyer_id:
+        # Нажал покупатель (сделку создал продавец)
+        # Ему (себе) - ждите товар
+        await callback.message.answer(f"Вы приняли сделку! Ваши средства заморожены. Ожидайте передачу товара от продавца.")
+        # Продавцу (создателю) - передавайте товар
+        await bot.send_message(seller_id, f"🎉 Покупатель принял вашу сделку {deal_id}!\nЕго средства заморожены. Можете передавать товар.")
         
-        # ИСПРАВЛЕННЫЙ ТЕКСТ ДЛЯ ПОКУПАТЕЛЯ (ВТОРОЙ СТОРОНЫ)
-        await bot.send_message(buyer_id, f"🎉 Продавец принял вашу сделку {deal_id}!\nВаши средства заморожены. Ожидайте передачу товара от продавца.")
-        
-        # УВЕДОМЛЕНИЕ ДЛЯ ПРОДАВЦА (СЕБЕ, КТО НАЖАЛ)
+    elif user_id == seller_id:
+        # Нажал продавец (сделку создал покупатель)
+        # Ему (себе) - передавайте товар
         await callback.message.answer(f"Вы приняли сделку! Передайте товар покупателю и нажмите кнопку «Я передал товар» в приложении.")
-        
-    else:
-        await callback.answer("Вы не являетесь участником этой сделки", show_alert=True)
-        con.close()
+        # Покупателю (создателю) - ожидайте товар
+        await bot.send_message(buyer_id, f"🎉 Продавец принял вашу сделку {deal_id}!\nВаши средства заморожены. Ожидайте передачу товара от продавца.")
 
 @dp.callback_query(F.data.startswith("reject_"))
 async def cb_reject(callback: CallbackQuery):
