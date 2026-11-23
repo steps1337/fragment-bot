@@ -20,14 +20,13 @@ from aiogram.types import (
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.session.aiohttp import AiohttpSession
 
-# --- КОНФИГУРАЦИЯ ---
+
 BOT_TOKEN = "9227078546:AAFH8rNb7MDy8EqIQkSv8qZ4UhmdMKzewh0"
 MINI_APP_URL = os.getenv("MINI_APP_URL", "https://steps1337.github.io/mini-app-fragment/")
 TIMEOUT_SECONDS = 60
 API_PORT = int(os.getenv("PORT", 8000))
 DB_PATH = os.path.join(os.path.dirname(__file__), "deals.db")
 
-# ВАШ TELEGRAM ID (ЕДИНСТВЕННЫЙ АДМИН)
 ADMIN_ID = 7849089814
 
 # --- ПРОКСИ ---
@@ -48,7 +47,7 @@ def format_proxy(proxy_str):
 
 PROXY_URL = format_proxy(RAW_PROXY)
 
-# Курсы валют к рублю
+
 RATES_TO_RUB = {
     "RUB": 1.0,
     "UAH": 2.5,
@@ -796,29 +795,33 @@ async def cmd_users(message: Message):
     lines = []
     for row in rows:
         username = row["username"]
+        name = row["name"]
+        user_id = row["user_id"]
+        
+        # 👇 ИСПРАВЛЕННЫЙ БЛОК ВЫВОДА
         if username:
-            tag = f"@{username}"
-        elif row["name"]:
-            tag = f"{row['name']} (ID: {row['user_id']})"
+            tag = f"<a href='tg://user?id={user_id}'>@{username}</a>"
+        elif name:
+            tag = f"<a href='tg://user?id={user_id}'>{name}</a>"
         else:
-            tag = f"ID: {row['user_id']}"
+            tag = f"<a href='tg://user?id={user_id}'>ID: {user_id}</a>"
 
         balance = row["balance"] or 0.0
         ban_icon = "❌" if row["is_banned"] else "✅"
 
         lines.append(f"{tag} — {balance:.2f} ₽ — {ban_icon}")
 
-    header = f"👥 *Пользователи ({len(rows)})*\n\n"
+    header = f"👥 <b>Пользователи ({len(rows)})</b>\n\n"
 
     chunk = header
     for line in lines:
         if len(chunk) + len(line) + 1 > 4000:
-            await message.answer(chunk, parse_mode="Markdown")
+            await message.answer(chunk, parse_mode="HTML")
             chunk = ""
         chunk += line + "\n"
 
     if chunk.strip():
-        await message.answer(chunk, parse_mode="Markdown")
+        await message.answer(chunk, parse_mode="HTML")
 
 @dp.message(Command("bal"))
 async def cmd_bal(message: Message, command: CommandObject):
@@ -884,7 +887,6 @@ async def cmd_stats(message: Message):
     deals_completed = con.execute("SELECT COUNT(*) AS c FROM deals WHERE status = 'completed'").fetchone()["c"]
     deals_cancelled = con.execute("SELECT COUNT(*) AS c FROM deals WHERE status = 'cancelled'").fetchone()["c"]
 
-    # Оборот считаем по завершённым сделкам, пересчитывая каждую в рубли
     completed_rows = con.execute("SELECT amount, currency FROM deals WHERE status = 'completed'").fetchall()
     turnover_rub = 0.0
     for r in completed_rows:
@@ -923,7 +925,6 @@ async def cmd_deals(message: Message, command: CommandObject):
 
     con = db_conn()
 
-    # Ищем пользователя: сначала по ID (если число), иначе по username
     target_row = None
     if raw.isdigit():
         target_row = con.execute(
@@ -978,13 +979,11 @@ async def cmd_deals(message: Message, command: CommandObject):
         created = (r["created_at"] or "")[:10]
         role = "🛒 покупатель" if r["buyer_id"] == target_id else "📤 продавец"
 
-        # Контрагент
         if r["buyer_id"] == target_id:
             cp_id = r["seller_id"]
         else:
             cp_id = r["buyer_id"]
 
-        # Описание: первая строка без [CURRENCY]
         desc_raw = (r["description"] or "").replace("\n", " ")
         desc_raw = desc_raw.split("[", 1)[-1]
         if "]" in desc_raw:
