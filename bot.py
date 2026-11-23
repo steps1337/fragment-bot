@@ -266,6 +266,17 @@ async def create_deal_from_app(req: NewDealRequest):
         seller_id, seller_name = req.creator_id, req.creator_name
         buyer_id, buyer_name = req.partner_id, partner_name
 
+    # ПРОВЕРКА БАЛАНСА: ТОЛЬКО ЕСЛИ СОЗДАТЕЛЬ - ПОКУПАТЕЛЬ
+    if req.role == 'buyer':
+        amount_in_rub = req.amount * RATES_TO_RUB.get(req.currency, 1.0)
+        buyer_balance = get_balance(req.creator_id)
+        if buyer_balance < amount_in_rub:
+            raise HTTPException(
+                400, 
+                f"У вас недостаточно средств для создания этой сделки. "
+                f"Нужно: {amount_in_rub:.2f} ₽, у вас: {buyer_balance:.2f} ₽"
+            )
+
     deal_id = secrets.token_hex(3).upper()
     now = datetime.utcnow().isoformat()
 
