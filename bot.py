@@ -39,7 +39,7 @@ def format_proxy(proxy_str):
     parts = proxy_str.split(":")
     if len(parts) == 4:
         host, port, login, password = parts
-        return f"socks5://{login}:{password}@{host}:{port}"
+        return f"http://{login}:{password}@{host}:{port}"
     if len(parts) == 2:
         return f"http://{proxy_str}"
     return proxy_str
@@ -370,7 +370,7 @@ async def handle_deal_action(deal_id: str, payload: DealActionIn):
         new_status = 'delivered'
         notify_text = f"📦 Продавец подтвердил передачу товара по сделке #{deal_id}!\nПроверьте товар и нажмите 'Я получил' в приложении."
 
-        elif payload.action == 'received':
+    elif payload.action == 'received':
         if not is_buyer:
             con.close()
             raise HTTPException(400, "Только покупатель может подтвердить получение")
@@ -471,7 +471,6 @@ async def cb_accept(callback: CallbackQuery):
     amount_in_rub = amount * RATES_TO_RUB.get(currency, 1.0)
 
     if user_id == seller_id:
-        # Продавец принимает -> замораживаем его средства
         if not freeze_balance(seller_id, amount_in_rub): 
             bal = get_balance(seller_id)
             await callback.answer(f"❌ Недостаточно средств у продавца!\nНужно: {amount} {currency} ({amount_in_rub:.2f} ₽)\nУ вас: {bal:.2f} ₽", show_alert=True)
@@ -489,7 +488,6 @@ async def cb_accept(callback: CallbackQuery):
         await callback.message.answer(f"Вы приняли сделку! Передайте товар покупателю и нажмите кнопку в приложении.")
 
     elif user_id == buyer_id:
-        # Покупатель принимает -> ПРОВЕРЯЕМ его баланс и замораживаем средства
         if not freeze_balance(buyer_id, amount_in_rub): 
             bal = get_balance(buyer_id)
             await callback.answer(f"❌ Недостаточно средств у покупателя!\nНужно: {amount} {currency} ({amount_in_rub:.2f} ₽)\nУ вас: {bal:.2f} ₽", show_alert=True)
