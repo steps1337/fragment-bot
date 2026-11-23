@@ -235,6 +235,18 @@ async def list_deals(user_id: int):
     con.close()
     return [dict(r) for r in rows]
 
+# НОВЫЙ ЭНДПОИНТ: История выводов
+@api.get("/withdrawals")
+async def list_withdrawals(user_id: int):
+    ensure_user(user_id)
+    con = db_conn()
+    rows = con.execute(
+        "SELECT * FROM withdrawals WHERE user_id = ? ORDER BY created_at DESC",
+        (user_id,),
+    ).fetchall()
+    con.close()
+    return [dict(r) for r in rows]
+
 @api.post("/api/create-deal")
 async def create_deal_from_app(req: NewDealRequest):
     ensure_user(req.creator_id, req.creator_name)
@@ -382,10 +394,7 @@ async def handle_deal_action(deal_id: str, payload: DealActionIn):
         
         amount_in_rub = deal['amount'] * RATES_TO_RUB.get(deal['currency'], 1.0)
         
-        # Возвращаем замороженные средства покупателю (гарант)
         unfreeze_balance(deal['buyer_id'], amount_in_rub) 
-        
-        # И ПЕРЕВОДИМ ИХ ПРОДАВЦУ (оплата за товар)
         add_balance(deal['seller_id'], amount_in_rub)
         
         notify_text = f"✅ Сделка #{deal_id} завершена!\nПокупатель подтвердил получение. Средства переведены продавцу."
