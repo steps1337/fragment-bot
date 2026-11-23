@@ -29,39 +29,30 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "deals.db")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 # --- ПРОКСИ ---
-# Ваш формат: host:port:login:password
 RAW_PROXY = os.getenv("PROXY_URL", "168.196.238.49:9316:r2nEE7:NA4P02")
 
-# Функция для преобразования формата в URL
 def format_proxy(proxy_str):
     if not proxy_str:
         return None
-    # Если уже передан в формате URL (http://... или socks5://...), возвращаем как есть
     if "://" in proxy_str:
         return proxy_str
-    
-    # Если формат host:port:login:password
     parts = proxy_str.split(":")
     if len(parts) == 4:
         host, port, login, password = parts
-        # Для HTTP-прокси используем http://
         return f"http://{login}:{password}@{host}:{port}"
-    
-    # Если просто host:port (без авторизации)
     if len(parts) == 2:
         return f"http://{proxy_str}"
-        
     return proxy_str
 
 PROXY_URL = format_proxy(RAW_PROXY)
 
-# Курсы валют к рублю (сколько рублей стоит 1 единица валюты)
+# Курсы валют к рублю
 RATES_TO_RUB = {
     "RUB": 1.0,
-    "UAH": 2.5,     # Пример
-    "USDT": 90.0,   # Пример
-    "GRAM": 95.0,   # 1 GRAM = 95 руб
-    "STARS": 1.5    # Пример
+    "UAH": 2.5,
+    "USDT": 90.0,
+    "GRAM": 95.0,
+    "STARS": 1.5
 }
 
 logging.basicConfig(level=logging.INFO)
@@ -171,7 +162,6 @@ def freeze_balance(user_id: int, amount: float) -> bool:
     if not row or row["balance"] < amount:
         con.close()
         return False
-
     con.execute("UPDATE users SET balance = balance - ? WHERE user_id = ?", (amount, user_id))
     con.commit()
     con.close()
@@ -390,20 +380,29 @@ async def handle_deal_action(deal_id: str, payload: DealActionIn):
 
         new_status = 'completed'
         
-        # ВМЕСТО РАЗМОРОЗКИ ПРОДАВЦУ — НАЧИСЛЯЕМ ПОКУПАТЕЛЮ
-        # Сумма в рублях, которую мы заморозили у продавца
         amount_in_rub = deal['amount'] * RATES_TO_RUB.get(deal['currency'], 1.0)
         
-        # Начисляем эти деньги покупателю
-        add_balance(deal['buyer_id'], amount_in_rub)
+        # Возвращаем замороженные средства покупателю (раз сделка успешна)
+        unfreeze_balance(deal['buyer_id'], amount_in_rub) 
         
-        notify_text = f"✅ Сделка #{deal_id} завершена!\nПокупатель подтвердил получение. Средства переведены покупателю."
+        # И ПЕРЕВОДИМ ИХ ПРОДАВЦУ
+        add_balance(deal['seller_id'], amount_in_rub)
+        
+        notify_text = f"✅ Сделка #{deal_id} завершена!\nПокупатель подтвердил получение. Средства переведены продавцу."
 
-        # Уведомляем продавца, что сделка завершена (деньги ушли покупателю)
-        try:
-            await bot.send_message(deal['seller_id'], f"✅ Сделка #{deal_id} завершена!\nПокупатель подтвердил получение. Средства переведены покупателю.")
-        except:
-            pass
+    else:
+        con.close()
+        raise HTTPException(400, "Неизвестное действие")
+
+    con.execute("UPDATE deals SET status = ? WHERE id = ?", (new_status, deal_id))
+    con.commit()
+    con.close()
+
+    target_id = deal["seller_id"] if is_buyer else deal["buyer_id"]
+    try:
+        await bot.send_message(target_id, notify_text)
+    except:
+        pass
 
     return {"status": "ok", "new_status": new_status}
 
@@ -469,12 +468,14 @@ async def cb_accept(callback: CallbackQuery):
     buyer_id = deal["buyer_id"]
     seller_id = deal["seller_id"]
     
+    # Сумма в рублях, которая должна быть на балансе
     amount_in_rub = amount * RATES_TO_RUB.get(currency, 1.0)
 
     if user_id == seller_id:
+        # Продавец принимает -> замораживаем его средства
         if not freeze_balance(seller_id, amount_in_rub): 
             bal = get_balance(seller_id)
-            await callback.answer(f"Недостаточно средств! Нужно {amount} {currency} (это {amount_in_rub:.2f} ₽), у вас {bal:.2f} ₽", show_alert=True)
+            await callback.answer(f"❌ Недостаточно средств у продавца!\nНужно: {amount} {currency} ({amount_in_rub:.2f} ₽)\nУ вас: {bal:.2f} ₽", show_alert=True)
             con.close()
             return
             
@@ -489,14 +490,21 @@ async def cb_accept(callback: CallbackQuery):
         await callback.message.answer(f"Вы приняли сделку! Передайте товар покупателю и нажмите кнопку в приложении.")
 
     elif user_id == buyer_id:
+        # Покупатель принимает -> ПРОВЕРЯЕМ его баланс и замораживаем средства
+        if not freeze_balance(buyer_id, amount_in_rub): 
+            bal = get_balance(buyer_id)
+            await callback.answer(f"❌ Недостаточно средств у покупателя!\nНужно: {amount} {currency} ({amount_in_rub:.2f} ₽)\nУ вас: {bal:.2f} ₽", show_alert=True)
+            con.close()
+            return
+            
         con.execute("UPDATE deals SET status = 'active' WHERE id = ?", (deal_id,))
         con.commit()
         con.close()
 
-        await callback.answer("Сделка принята! Ожидайте передачу.")
-        await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.")
+        await callback.answer("Сделка принята! Ваши средства заморожены.")
+        await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nВаш гарант: {amount} {currency} заморожен.")
         
-        await bot.send_message(seller_id, f"🎉 Покупатель принял сделку {deal_id}!\nМожете передавать товар.")
+        await bot.send_message(seller_id, f"🎉 Покупатель принял сделку {deal_id}!\nЕго средства заморожены. Можете передавать товар.")
         await callback.message.answer(f"Вы приняли сделку! Ожидайте передачу товара от продавца.")
         
     else:
