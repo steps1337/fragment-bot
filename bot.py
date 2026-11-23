@@ -26,7 +26,9 @@ MINI_APP_URL = os.getenv("MINI_APP_URL", "https://steps1337.github.io/mini-app-f
 TIMEOUT_SECONDS = 60
 API_PORT = int(os.getenv("PORT", 8000))
 DB_PATH = os.path.join(os.path.dirname(__file__), "deals.db")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+
+# ВАШ TELEGRAM ID (ЕДИНСТВЕННЫЙ АДМИН)
+ADMIN_ID = 7849089814
 
 # --- ПРОКСИ ---
 RAW_PROXY = os.getenv("PROXY_URL", "168.196.238.49:9316:r2nEE7:NA4P02")
@@ -87,7 +89,8 @@ def db_init():
             user_id INTEGER PRIMARY KEY,
             balance REAL DEFAULT 0.0,
             name TEXT DEFAULT '',
-            username TEXT DEFAULT ''
+            username TEXT DEFAULT '',
+            is_banned INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS deals (
             id           TEXT PRIMARY KEY,
@@ -115,11 +118,12 @@ def db_init():
         );
     """)
 
+    # Миграция для добавления поля is_banned, если таблица уже существовала
     cursor = con.execute("PRAGMA table_info(users)")
     columns = [row[1] for row in cursor.fetchall()]
-    if 'username' not in columns:
-        print("🔧 Миграция БД: добавляю столбец 'username'...")
-        con.execute("ALTER TABLE users ADD COLUMN username TEXT DEFAULT ''")
+    if 'is_banned' not in columns:
+        print("🔧 Миграция БД: добавляю столбец 'is_banned'...")
+        con.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
 
     con.commit()
     con.close()
@@ -132,7 +136,7 @@ def db_conn():
 def ensure_user(user_id: int, name: str = "", username: str = ""):
     con = db_conn()
     con.execute(
-        "INSERT OR IGNORE INTO users (user_id, balance, name, username) VALUES (?, 0.0, ?, ?)",
+        "INSERT OR IGNORE INTO users (user_id, balance, name, username, is_banned) VALUES (?, 0.0, ?, ?, 0)",
         (user_id, name, username)
     )
     if name:
@@ -222,6 +226,13 @@ async def resolve_username(username: str):
 
 @api.get("/user")
 async def get_user(user_id: int):
+    con = db_conn()
+    row = con.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    con.close()
+    
+    if row and row["is_banned"]:
+        raise HTTPException(status_code=403, detail="Вы забанены в сервисе Fragment")
+        
     return {"user_id": user_id, "balance": get_balance(user_id)}
 
 @api.get("/deals")
@@ -252,8 +263,9 @@ async def create_deal_from_app(req: NewDealRequest):
     ensure_user(req.creator_id, req.creator_name)
     
     con = db_conn()
-    partner_row = con.execute("SELECT name FROM users WHERE user_id = ?", (req.partner_id,)).fetchone()
+    partner_row = con.execute("SELECT name, username FROM users WHERE user_id = ?", (req.partner_id,)).fetchone()
     partner_name = partner_row["name"] if partner_row else "Unknown"
+    partner_username = partner_row["username"] if partner_row else ""
     con.close()
     
     ensure_user(req.partner_id, partner_name)
@@ -294,6 +306,7 @@ async def create_deal_from_app(req: NewDealRequest):
         kb.button(text="❌ Отклонить", callback_data=f"reject_{deal_id}")
         kb.adjust(2)
         
+        # УВЕДОМЛЕНИЕ ПОЛЬЗОВАТЕЛЮ
         role_text = "покупатель" if req.role == 'buyer' else "продавец"
         await bot.send_message(
             req.partner_id,
@@ -307,6 +320,35 @@ async def create_deal_from_app(req: NewDealRequest):
             parse_mode="Markdown",
             reply_markup=kb.as_markup()
         )
+        
+        # УВЕДОМЛЕНИЕ АДМИНУ (ЛОГ)
+        con = db_conn()
+        creator_row = con.execute("SELECT username, name FROM users WHERE user_id = ?", (req.creator_id,)).fetchone()
+        con.close()
+        
+        creator_username = creator_row["username"] if creator_row else ""
+        creator_tag = f"@{creator_username}" if creator_username else req.creator_name
+        
+        partner_tag = f"@{partner_username}" if partner_username else partner_name
+        
+        if req.role == 'buyer':
+            buyer_log = f"{creator_tag} (ID: {req.creator_id})"
+            seller_log = f"{partner_tag} (ID: {req.partner_id})"
+        else:
+            buyer_log = f"{partner_tag} (ID: {req.partner_id})"
+            seller_log = f"{creator_tag} (ID: {req.creator_id})"
+
+        await bot.send_message(
+            ADMIN_ID,
+            f"🔔 *Новая сделка в системе!*\n\n"
+            f"📦 Товар: {req.description}\n"
+            f"💰 Сумма: {req.amount} {req.currency}\n"
+            f"🛒 Покупатель: {buyer_log}\n"
+            f"📤 Продавец: {seller_log}\n"
+            f"🆔 ID сделки: `{deal_id}`",
+            parse_mode="Markdown"
+        )
+        
     except Exception as e:
         con.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -433,6 +475,14 @@ async def handle_deal_action(deal_id: str, payload: DealActionIn):
 async def cmd_start(message: Message):
     username = message.from_user.username or ""
     ensure_user(message.from_user.id, message.from_user.first_name, username)
+    
+    # Проверка на бан при запуске бота
+    con = db_conn()
+    row = con.execute("SELECT is_banned FROM users WHERE user_id = ?", (message.from_user.id,)).fetchone()
+    con.close()
+    if row and row["is_banned"]:
+        await message.answer("⛔ Вы забанены в сервисе Fragment.")
+        return
 
     IMAGE_PATH = "start_image.jpg"
 
@@ -582,58 +632,46 @@ async def cb_withdraw_reject(callback: CallbackQuery):
     except:
         pass
 
-@dp.message(Command("promo"))
-async def cmd_promo(message: Message, command: CommandObject):
-    ensure_user(message.from_user.id)
-    if not command.args: return
-
-    code = command.args.strip().upper()
-    PROMO_CODES = {"START100": 100.0, "FRAGMENT500": 500.0, "STARS1000": 1000.0}
-
-    if code in PROMO_CODES:
-        amount = PROMO_CODES[code]
-        add_balance(message.from_user.id, amount)
-        PROMO_CODES.pop(code, None)
-        await message.answer(f"✅ *Код активирован!* Начислено: **{amount} ₽**", parse_mode="Markdown")
-    else:
-        await message.answer("❌ Неверный или использованный промокод.")
-
-# --- АДМИН ПАНЕЛЬ: КОД И ВЫДАЧА БАЛАНСА ---
-admin_sessions = set()
-
-@dp.message(Command("code"))
-async def cmd_code(message: Message, command: CommandObject):
-    if not command.args:
-        await message.answer("Введите код: /code <код>")
-        return
+# --- АДМИН ПАНЕЛЬ ---
+@dp.message(Command("admin"))
+async def cmd_admin(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return  # Игнорируем команду от всех, кроме админа
         
-    secret_code = command.args.strip()
-    
-    if secret_code == "555":
-        admin_sessions.add(message.from_user.id)
-        await message.answer("✅ Доступ разрешен! Теперь вы можете выдавать баланс.\n\nПример: `/addbal 1000 rub`", parse_mode="Markdown")
-    else:
-        await message.answer("❌ Неверный код.")
+    text = (
+        "👑 *Админ-панель Fragment*\n\n"
+        "Доступные команды:\n"
+        "`/addbal <ID> <сумма> <валюта>` — выдать баланс\n"
+        "`/backbal <ID> <сумма> <валюта>` — списать баланс\n"
+        "`/ban <ID>` — забанить пользователя\n"
+        "`/unban <ID>` — разбанить пользователя\n\n"
+        "*Примеры:*\n"
+        "`/addbal 123456789 1000 rub`\n"
+        "`/backbal 123456789 500 rub`\n"
+        "`/ban 123456789`"
+    )
+    await message.answer(text, parse_mode="Markdown")
 
 @dp.message(Command("addbal"))
 async def cmd_addbal(message: Message, command: CommandObject):
-    if message.from_user.id not in admin_sessions:
+    if message.from_user.id != ADMIN_ID:
         return
-
+        
     if not command.args:
-        await message.answer("Использование: `/addbal <сумма> <валюта>`\nВалюты: rub, uah, usdt, gram, star", parse_mode="Markdown")
+        await message.answer("Использование: `/addbal <ID> <сумма> <валюта>`\nВалюты: rub, uah, usdt, gram, star", parse_mode="Markdown")
         return
 
     parts = command.args.strip().split()
-    if len(parts) != 2:
-        await message.answer("Неверный формат. Пример: `/addbal 1000 rub`", parse_mode="Markdown")
+    if len(parts) != 3:
+        await message.answer("Неверный формат. Пример: `/addbal 123456789 1000 rub`", parse_mode="Markdown")
         return
 
     try:
-        amount = float(parts[0].replace(",", "."))
-        currency = parts[1].upper()
+        target_id = int(parts[0])
+        amount = float(parts[1].replace(",", "."))
+        currency = parts[2].upper()
     except ValueError:
-        await message.answer("❌ Неверная сумма.")
+        await message.answer("❌ Неверные данные (ID или сумма).")
         return
 
     if currency not in RATES_TO_RUB:
@@ -641,14 +679,124 @@ async def cmd_addbal(message: Message, command: CommandObject):
         return
 
     rub_amount = amount * RATES_TO_RUB[currency]
-    add_balance(message.from_user.id, rub_amount)
-    new_bal = get_balance(message.from_user.id)
+    add_balance(target_id, rub_amount)
+    new_bal = get_balance(target_id)
     
     await message.answer(
         f"✅ Начислено: *{amount} {currency}* (эквивалент {rub_amount:.2f} ₽).\n"
-        f"Текущий баланс: *{new_bal:.2f} ₽*", 
+        f"Пользователю `{target_id}`.\n"
+        f"Его текущий баланс: *{new_bal:.2f} ₽*", 
         parse_mode="Markdown"
     )
+    
+    # Уведомляем пользователя о пополнении
+    try:
+        await bot.send_message(target_id, f"💰 Ваш баланс пополнен на {amount} {currency} ({rub_amount:.2f} ₽)!")
+    except:
+        pass
+
+@dp.message(Command("backbal"))
+async def cmd_backbal(message: Message, command: CommandObject):
+    if message.from_user.id != ADMIN_ID:
+        return
+        
+    if not command.args:
+        await message.answer("Использование: `/backbal <ID> <сумма> <валюта>`\nВалюты: rub, uah, usdt, gram, star", parse_mode="Markdown")
+        return
+
+    parts = command.args.strip().split()
+    if len(parts) != 3:
+        await message.answer("Неверный формат. Пример: `/backbal 123456789 500 rub`", parse_mode="Markdown")
+        return
+
+    try:
+        target_id = int(parts[0])
+        amount = float(parts[1].replace(",", "."))
+        currency = parts[2].upper()
+    except ValueError:
+        await message.answer("❌ Неверные данные (ID или сумма).")
+        return
+
+    if currency not in RATES_TO_RUB:
+        await message.answer(f"❌ Неизвестная валюта. Доступны: {', '.join(RATES_TO_RUB.keys())}")
+        return
+
+    rub_amount = amount * RATES_TO_RUB[currency]
+    
+    # Проверяем, хватает ли у пользователя средств для списания
+    current_bal = get_balance(target_id)
+    if current_bal < rub_amount:
+        await message.answer(f"❌ У пользователя недостаточно средств для списания!\nНужно: {rub_amount:.2f} ₽\nУ него: {current_bal:.2f} ₽")
+        return
+
+    # Списываем
+    add_balance(target_id, -rub_amount)
+    new_bal = get_balance(target_id)
+    
+    await message.answer(
+        f"✅ Списано: *{amount} {currency}* (эквивалент {rub_amount:.2f} ₽).\n"
+        f"У пользователя `{target_id}`.\n"
+        f"Его текущий баланс: *{new_bal:.2f} ₽*", 
+        parse_mode="Markdown"
+    )
+    
+    # Уведомляем пользователя о списании
+    try:
+        await bot.send_message(target_id, f"⚠️ С вашего баланса списано {amount} {currency} ({rub_amount:.2f} ₽).")
+    except:
+        pass
+
+@dp.message(Command("ban"))
+async def cmd_ban(message: Message, command: CommandObject):
+    if message.from_user.id != ADMIN_ID:
+        return
+        
+    if not command.args:
+        await message.answer("Использование: `/ban <ID>`", parse_mode="Markdown")
+        return
+        
+    try:
+        target_id = int(command.args.strip())
+    except ValueError:
+        await message.answer("❌ Неверный ID.")
+        return
+        
+    con = db_conn()
+    con.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (target_id,))
+    con.commit()
+    con.close()
+    
+    await message.answer(f"⛔ Пользователь `{target_id}` забанен.", parse_mode="Markdown")
+    try:
+        await bot.send_message(target_id, "⛔ Вы забанены в сервисе Fragment.")
+    except:
+        pass
+
+@dp.message(Command("unban"))
+async def cmd_unban(message: Message, command: CommandObject):
+    if message.from_user.id != ADMIN_ID:
+        return
+        
+    if not command.args:
+        await message.answer("Использование: `/unban <ID>`", parse_mode="Markdown")
+        return
+        
+    try:
+        target_id = int(command.args.strip())
+    except ValueError:
+        await message.answer("❌ Неверный ID.")
+        return
+        
+    con = db_conn()
+    con.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (target_id,))
+    con.commit()
+    con.close()
+    
+    await message.answer(f"✅ Пользователь `{target_id}` разбанен.", parse_mode="Markdown")
+    try:
+        await bot.send_message(target_id, "✅ Вы были разбанены в сервисе Fragment. Доступ восстановлен.")
+    except:
+        pass
 
 # --- ОБРАБОТЧИКИ КНОПОК МЕНЮ ---
 
