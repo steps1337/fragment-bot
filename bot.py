@@ -21,7 +21,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.client.session.aiohttp import AiohttpSession
 
 # --- КОНФИГУРАЦИЯ ---
-BOT_TOKEN = "9227078546:AAFH8rNb7MDy8EqIQkSv8qZ4UhmdMKzewh0" 
+BOT_TOKEN = "9227078546:AAFH8rNb7MDy8EqIQkSv8qZ4UhmdMKzewh0"
 MINI_APP_URL = os.getenv("MINI_APP_URL", "https://steps1337.github.io/mini-app-fragment/")
 TIMEOUT_SECONDS = 60
 API_PORT = int(os.getenv("PORT", 8000))
@@ -118,7 +118,6 @@ def db_init():
         );
     """)
 
-    # Миграция для добавления поля is_banned, если таблица уже существовала
     cursor = con.execute("PRAGMA table_info(users)")
     columns = [row[1] for row in cursor.fetchall()]
     if 'is_banned' not in columns:
@@ -246,7 +245,6 @@ async def list_deals(user_id: int):
     con.close()
     return [dict(r) for r in rows]
 
-# ЭНДПОИНТ: История выводов
 @api.get("/withdrawals")
 async def list_withdrawals(user_id: int):
     ensure_user(user_id)
@@ -270,7 +268,6 @@ async def create_deal_from_app(req: NewDealRequest):
     
     ensure_user(req.partner_id, partner_name)
     
-    # ОПРЕДЕЛЯЕМ РОЛИ ЗАРАНЕЕ
     if req.role == 'buyer':
         buyer_id, buyer_name = req.creator_id, req.creator_name
         seller_id, seller_name = req.partner_id, partner_name
@@ -278,7 +275,6 @@ async def create_deal_from_app(req: NewDealRequest):
         seller_id, seller_name = req.creator_id, req.creator_name
         buyer_id, buyer_name = req.partner_id, partner_name
 
-    # ПРОВЕРКА БАЛАНСА: СТРОГО У ПОКУПАТЕЛЯ (неважно, кто создатель)
     amount_in_rub = req.amount * RATES_TO_RUB.get(req.currency, 1.0)
     buyer_balance = get_balance(buyer_id)
     if buyer_balance < amount_in_rub:
@@ -293,7 +289,6 @@ async def create_deal_from_app(req: NewDealRequest):
 
     con = db_conn()
     try:
-        # ИСПРАВЛЕНИЕ: в owner_id пишем req.creator_id (реального создателя)
         con.execute(
             """INSERT INTO deals (id, owner_id, owner_name, partner_id, partner_name, buyer_id, seller_id, role, amount, currency, description, status, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, 'buyer', ?, ?, ?, 'pending', ?)""",
@@ -306,7 +301,6 @@ async def create_deal_from_app(req: NewDealRequest):
         kb.button(text="❌ Отклонить", callback_data=f"reject_{deal_id}")
         kb.adjust(2)
         
-        # УВЕДОМЛЕНИЕ ПОЛЬЗОВАТЕЛЮ
         role_text = "покупатель" if req.role == 'buyer' else "продавец"
         await bot.send_message(
             req.partner_id,
@@ -321,7 +315,6 @@ async def create_deal_from_app(req: NewDealRequest):
             reply_markup=kb.as_markup()
         )
         
-        # УВЕДОМЛЕНИЕ АДМИНУ (ЛОГ)
         con = db_conn()
         creator_row = con.execute("SELECT username, name FROM users WHERE user_id = ?", (req.creator_id,)).fetchone()
         con.close()
@@ -446,8 +439,6 @@ async def handle_deal_action(deal_id: str, payload: DealActionIn):
         new_status = 'completed'
         
         amount_in_rub = deal['amount'] * RATES_TO_RUB.get(deal['currency'], 1.0)
-        
-        # СПИСЫВАЕМ СРЕДСТВА У ПОКУПАТЕЛЯ (они уже были заморожены при принятии)
         add_balance(deal['seller_id'], amount_in_rub)
         
         notify_text = f"✅ Сделка #{deal_id} завершена!\nПокупатель подтвердил получение. Средства переведены продавцу."
@@ -476,7 +467,6 @@ async def cmd_start(message: Message):
     username = message.from_user.username or ""
     ensure_user(message.from_user.id, message.from_user.first_name, username)
     
-    # Проверка на бан при запуске бота
     con = db_conn()
     row = con.execute("SELECT is_banned FROM users WHERE user_id = ?", (message.from_user.id,)).fetchone()
     con.close()
@@ -537,25 +527,21 @@ async def cb_accept(callback: CallbackQuery):
     currency = deal["currency"]
     buyer_id = deal["buyer_id"]
     seller_id = deal["seller_id"]
-    owner_id = deal["owner_id"] # ID создателя сделки
+    owner_id = deal["owner_id"]
     
     amount_in_rub = amount * RATES_TO_RUB.get(currency, 1.0)
 
-    # ПРОВЕРКА: ЕСЛИ НАЖАЛ СОЗДАТЕЛЬ, ОН НЕ МОЖЕТ ПРИНЯТЬ СВОЮ ЖЕ СДЕЛКУ
     if user_id == owner_id:
         await callback.answer("Вы создатель этой сделки. Ждите, пока вторая сторона её примет.", show_alert=True)
         con.close()
         return
 
-    # ЕСЛИ НАЖАЛ НЕ СОЗДАТЕЛЬ, ЗНАЧИТ ЭТО ВТОРАЯ СТОРОНА, ОН МОЖЕТ ПРИНЯТЬ
-    # Проверяем, что у покупателя есть средства для заморозки
     if not freeze_balance(buyer_id, amount_in_rub):
         bal = get_balance(buyer_id)
         await callback.answer(f"❌ У покупателя недостаточно средств!\nНужно: {amount} {currency} ({amount_in_rub:.2f} ₽)\nУ него: {bal:.2f} ₽", show_alert=True)
         con.close()
         return
 
-    # АКТИВИРУЕМ СДЕЛКУ
     con.execute("UPDATE deals SET status = 'active' WHERE id = ?", (deal_id,))
     con.commit()
     con.close()
@@ -563,19 +549,12 @@ async def cb_accept(callback: CallbackQuery):
     await callback.answer("Сделка принята! Средства покупателя заморожены.")
     await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nГарант: {amount} {currency} заморожен у покупателя.")
     
-    # РАЗДЕЛЯЕМ УВЕДОМЛЕНИЯ В ЗАВИСИМОСТИ ОТ РОЛИ ТОГО, КТО НАЖАЛ
     if user_id == buyer_id:
-        # Нажал покупатель (сделку создал продавец)
-        # Ему (себе) - ждите товар
         await callback.message.answer(f"Вы приняли сделку! Ваши средства заморожены. Ожидайте передачу товара от продавца.")
-        # Продавцу (создателю) - передавайте товар
         await bot.send_message(seller_id, f"🎉 Покупатель принял вашу сделку {deal_id}!\nЕго средства заморожены. Можете передавать товар.")
         
     elif user_id == seller_id:
-        # Нажал продавец (сделку создал покупатель)
-        # Ему (себе) - передавайте товар
         await callback.message.answer(f"Вы приняли сделку! Передайте товар покупателю и нажмите кнопку «Я передал товар» в приложении.")
-        # Покупателю (создателю) - ожидайте товар
         await bot.send_message(buyer_id, f"🎉 Продавец принял вашу сделку {deal_id}!\nВаши средства заморожены. Ожидайте передачу товара от продавца.")
 
 @dp.callback_query(F.data.startswith("reject_"))
@@ -636,19 +615,23 @@ async def cb_withdraw_reject(callback: CallbackQuery):
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
     if message.from_user.id != ADMIN_ID:
-        return  # Игнорируем команду от всех, кроме админа
+        return
         
     text = (
         "👑 *Админ-панель Fragment*\n\n"
         "Доступные команды:\n"
+        "`/stats` — сводная статистика сервиса\n"
+        "`/users` — список всех пользователей (✅/❌)\n"
+        "`/bal <ID>` — баланс и статус пользователя\n"
+        "`/deals <@username|ID>` — все сделки пользователя\n"
         "`/addbal <ID> <сумма> <валюта>` — выдать баланс\n"
         "`/backbal <ID> <сумма> <валюта>` — списать баланс\n"
         "`/ban <ID>` — забанить пользователя\n"
-        "`/unban <ID>` — разбанить пользователя\n"
-        "`/users` — список всех пользователей\n\n"
+        "`/unban <ID>` — разбанить пользователя\n\n"
         "*Примеры:*\n"
+        "`/bal 123456789`\n"
+        "`/deals @danya_102b`\n"
         "`/addbal 123456789 1000 rub`\n"
-        "`/backbal 123456789 500 rub`\n"
         "`/ban 123456789`"
     )
     await message.answer(text, parse_mode="Markdown")
@@ -690,7 +673,6 @@ async def cmd_addbal(message: Message, command: CommandObject):
         parse_mode="Markdown"
     )
     
-    # Уведомляем пользователя о пополнении
     try:
         await bot.send_message(target_id, f"💰 Ваш баланс пополнен на {amount} {currency} ({rub_amount:.2f} ₽)!")
     except:
@@ -724,13 +706,11 @@ async def cmd_backbal(message: Message, command: CommandObject):
 
     rub_amount = amount * RATES_TO_RUB[currency]
     
-    # Проверяем, хватает ли у пользователя средств для списания
     current_bal = get_balance(target_id)
     if current_bal < rub_amount:
         await message.answer(f"❌ У пользователя недостаточно средств для списания!\nНужно: {rub_amount:.2f} ₽\nУ него: {current_bal:.2f} ₽")
         return
 
-    # Списываем
     add_balance(target_id, -rub_amount)
     new_bal = get_balance(target_id)
     
@@ -741,7 +721,6 @@ async def cmd_backbal(message: Message, command: CommandObject):
         parse_mode="Markdown"
     )
     
-    # Уведомляем пользователя о списании
     try:
         await bot.send_message(target_id, f"⚠️ С вашего баланса списано {amount} {currency} ({rub_amount:.2f} ₽).")
     except:
@@ -802,7 +781,7 @@ async def cmd_unban(message: Message, command: CommandObject):
 @dp.message(Command("users"))
 async def cmd_users(message: Message):
     if message.from_user.id != ADMIN_ID:
-        return  # Игнорируем команду от всех, кроме админа
+        return
 
     con = db_conn()
     rows = con.execute(
@@ -814,7 +793,6 @@ async def cmd_users(message: Message):
         await message.answer("📭 В базе пока нет пользователей.")
         return
 
-    # Формируем строки: @user — баланс ₽ — ✅/❌
     lines = []
     for row in rows:
         username = row["username"]
@@ -832,13 +810,199 @@ async def cmd_users(message: Message):
 
     header = f"👥 *Пользователи ({len(rows)})*\n\n"
 
-    # Telegram ограничивает сообщение 4096 символами — разбиваем на части
     chunk = header
     for line in lines:
         if len(chunk) + len(line) + 1 > 4000:
             await message.answer(chunk, parse_mode="Markdown")
             chunk = ""
         chunk += line + "\n"
+
+    if chunk.strip():
+        await message.answer(chunk, parse_mode="Markdown")
+
+@dp.message(Command("bal"))
+async def cmd_bal(message: Message, command: CommandObject):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    if not command.args:
+        await message.answer(
+            "Использование: `/bal <ID>`\nПример: `/bal 123456789`",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        target_id = int(command.args.strip())
+    except ValueError:
+        await message.answer("❌ Неверный ID. Укажите числовой Telegram ID.")
+        return
+
+    con = db_conn()
+    row = con.execute(
+        "SELECT name, username, balance, is_banned FROM users WHERE user_id = ?",
+        (target_id,)
+    ).fetchone()
+    con.close()
+
+    if not row:
+        await message.answer(f"❌ Пользователь с ID `{target_id}` не найден в базе.", parse_mode="Markdown")
+        return
+
+    username = row["username"]
+    name = row["name"] or "—"
+    balance = row["balance"] or 0.0
+    ban_status = "❌ забанен" if row["is_banned"] else "✅ активен"
+
+    tag = f"@{username}" if username else "—"
+
+    text = (
+        f"👤 *Пользователь*\n\n"
+        f"🆔 ID: `{target_id}`\n"
+        f"📛 Имя: {name}\n"
+        f"🔗 Username: {tag}\n"
+        f"💰 Баланс: *{balance:.2f} ₽*\n"
+        f"🚦 Статус: {ban_status}"
+    )
+    await message.answer(text, parse_mode="Markdown")
+
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    con = db_conn()
+
+    users_total = con.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+    users_banned = con.execute("SELECT COUNT(*) AS c FROM users WHERE is_banned = 1").fetchone()["c"]
+    total_balance = con.execute("SELECT COALESCE(SUM(balance), 0) AS s FROM users").fetchone()["s"]
+
+    deals_total = con.execute("SELECT COUNT(*) AS c FROM deals").fetchone()["c"]
+    deals_pending = con.execute("SELECT COUNT(*) AS c FROM deals WHERE status = 'pending'").fetchone()["c"]
+    deals_active = con.execute("SELECT COUNT(*) AS c FROM deals WHERE status = 'active'").fetchone()["c"]
+    deals_delivered = con.execute("SELECT COUNT(*) AS c FROM deals WHERE status = 'delivered'").fetchone()["c"]
+    deals_completed = con.execute("SELECT COUNT(*) AS c FROM deals WHERE status = 'completed'").fetchone()["c"]
+    deals_cancelled = con.execute("SELECT COUNT(*) AS c FROM deals WHERE status = 'cancelled'").fetchone()["c"]
+
+    # Оборот считаем по завершённым сделкам, пересчитывая каждую в рубли
+    completed_rows = con.execute("SELECT amount, currency FROM deals WHERE status = 'completed'").fetchall()
+    turnover_rub = 0.0
+    for r in completed_rows:
+        turnover_rub += (r["amount"] or 0.0) * RATES_TO_RUB.get(r["currency"] or "RUB", 1.0)
+
+    con.close()
+
+    text = (
+        f"📊 *Статистика Fragment*\n\n"
+        f"👥 Пользователей: {users_total} (забанено: {users_banned})\n"
+        f"💼 Сделок: {deals_total} (активных: {deals_active}, завершено: {deals_completed}, отменено: {deals_cancelled})\n"
+        f"💰 Оборот: {turnover_rub:,.2f} ₽\n"
+        f"💸 На балансах: {total_balance:,.2f} ₽\n\n"
+        f"⏳ Ожидают принятия: {deals_pending}\n"
+        f"📦 Товар передан (ждём подтверждения): {deals_delivered}"
+    ).replace(",", " ")
+
+    await message.answer(text, parse_mode="Markdown")
+
+@dp.message(Command("deals"))
+async def cmd_deals(message: Message, command: CommandObject):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    if not command.args:
+        await message.answer(
+            "Использование: `/deals <@username|ID>`\n"
+            "Примеры:\n"
+            "`/deals @danya_102b`\n"
+            "`/deals 123456789`",
+            parse_mode="Markdown"
+        )
+        return
+
+    raw = command.args.strip().lstrip("@")
+
+    con = db_conn()
+
+    # Ищем пользователя: сначала по ID (если число), иначе по username
+    target_row = None
+    if raw.isdigit():
+        target_row = con.execute(
+            "SELECT user_id, name, username FROM users WHERE user_id = ?",
+            (int(raw),)
+        ).fetchone()
+    if not target_row:
+        target_row = con.execute(
+            "SELECT user_id, name, username FROM users WHERE LOWER(username) = ?",
+            (raw.lower(),)
+        ).fetchone()
+
+    if not target_row:
+        con.close()
+        await message.answer(f"❌ Пользователь `{raw}` не найден в базе.", parse_mode="Markdown")
+        return
+
+    target_id = target_row["user_id"]
+    target_username = target_row["username"] or ""
+    target_name = target_row["name"] or "—"
+    tag = f"@{target_username}" if target_username else f"ID {target_id}"
+
+    rows = con.execute(
+        "SELECT * FROM deals WHERE buyer_id = ? OR seller_id = ? ORDER BY created_at DESC LIMIT 30",
+        (target_id, target_id)
+    ).fetchall()
+    con.close()
+
+    if not rows:
+        await message.answer(f"📭 У пользователя {tag} пока нет сделок.", parse_mode="Markdown")
+        return
+
+    status_labels = {
+        "pending": "⏳ ожидание",
+        "active": "🔄 в работе",
+        "delivered": "📦 передан",
+        "completed": "✅ завершена",
+        "cancelled": "❌ отменена",
+    }
+
+    header = (
+        f"💼 *Сделки пользователя* {tag}\n"
+        f"📛 Имя: {target_name} · ID: `{target_id}`\n"
+        f"Всего показано: {len(rows)}\n\n"
+    )
+
+    lines = []
+    for r in rows:
+        curr = r["currency"] or "RUB"
+        amount = r["amount"] or 0.0
+        status = status_labels.get(r["status"], r["status"])
+        created = (r["created_at"] or "")[:10]
+        role = "🛒 покупатель" if r["buyer_id"] == target_id else "📤 продавец"
+
+        # Контрагент
+        if r["buyer_id"] == target_id:
+            cp_id = r["seller_id"]
+        else:
+            cp_id = r["buyer_id"]
+
+        # Описание: первая строка без [CURRENCY]
+        desc_raw = (r["description"] or "").replace("\n", " ")
+        desc_raw = desc_raw.split("[", 1)[-1]
+        if "]" in desc_raw:
+            desc_raw = desc_raw.split("]", 1)[1].strip()
+        desc_short = desc_raw[:40] + ("…" if len(desc_raw) > 40 else "")
+
+        lines.append(
+            f"`{r['id']}` · {status} · {amount:g} {curr} · {role}\n"
+            f"   👤 контрагент: `{cp_id}` · 📅 {created}\n"
+            f"   📝 {desc_short or '—'}"
+        )
+
+    chunk = header
+    for line in lines:
+        if len(chunk) + len(line) + 2 > 4000:
+            await message.answer(chunk, parse_mode="Markdown")
+            chunk = ""
+        chunk += line + "\n\n"
 
     if chunk.strip():
         await message.answer(chunk, parse_mode="Markdown")
