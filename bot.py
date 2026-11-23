@@ -39,7 +39,7 @@ def format_proxy(proxy_str):
     parts = proxy_str.split(":")
     if len(parts) == 4:
         host, port, login, password = parts
-        return f"http://{login}:{password}@{host}:{port}"
+        return f"socks5://{login}:{password}@{host}:{port}"
     if len(parts) == 2:
         return f"http://{proxy_str}"
     return proxy_str
@@ -382,10 +382,10 @@ async def handle_deal_action(deal_id: str, payload: DealActionIn):
         
         amount_in_rub = deal['amount'] * RATES_TO_RUB.get(deal['currency'], 1.0)
         
-        # Возвращаем замороженные средства покупателю (раз сделка успешна)
+        # Возвращаем замороженные средства покупателю (гарант)
         unfreeze_balance(deal['buyer_id'], amount_in_rub) 
         
-        # И ПЕРЕВОДИМ ИХ ПРОДАВЦУ
+        # И ПЕРЕВОДИМ ИХ ПРОДАВЦУ (оплата за товар)
         add_balance(deal['seller_id'], amount_in_rub)
         
         notify_text = f"✅ Сделка #{deal_id} завершена!\nПокупатель подтвердил получение. Средства переведены продавцу."
@@ -468,7 +468,6 @@ async def cb_accept(callback: CallbackQuery):
     buyer_id = deal["buyer_id"]
     seller_id = deal["seller_id"]
     
-    # Сумма в рублях, которая должна быть на балансе
     amount_in_rub = amount * RATES_TO_RUB.get(currency, 1.0)
 
     if user_id == seller_id:
