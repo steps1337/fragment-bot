@@ -258,7 +258,7 @@ async def create_deal_from_app(req: NewDealRequest):
     
     ensure_user(req.partner_id, partner_name)
     
-    # ОПРЕДЕЛЯЕМ РОЛИ
+    # ОПРЕДЕЛЯЕМ РОЛИ ЗАРАНЕЕ
     if req.role == 'buyer':
         buyer_id, buyer_name = req.creator_id, req.creator_name
         seller_id, seller_name = req.partner_id, partner_name
@@ -511,10 +511,10 @@ async def cb_accept(callback: CallbackQuery):
         await callback.answer("Сделка принята!")
         await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nГарант: {amount} {currency} заморожен у покупателя.")
         
-        # ИСПРАВЛЕННЫЙ ТЕКСТ ДЛЯ ПОКУПАТЕЛЯ
+        # ИСПРАВЛЕННЫЙ ТЕКСТ ДЛЯ ПОКУПАТЕЛЯ (ВТОРОЙ СТОРОНЫ)
         await bot.send_message(buyer_id, f"🎉 Продавец принял вашу сделку {deal_id}!\nВаши средства заморожены. Ожидайте передачу товара от продавца.")
         
-        # УВЕДОМЛЕНИЕ ДЛЯ ПРОДАВЦА (себе)
+        # УВЕДОМЛЕНИЕ ДЛЯ ПРОДАВЦА (СЕБЕ, КТО НАЖАЛ)
         await callback.message.answer(f"Вы приняли сделку! Передайте товар покупателю и нажмите кнопку «Я передал товар» в приложении.")
         
     else:
