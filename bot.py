@@ -644,7 +644,8 @@ async def cmd_admin(message: Message):
         "`/addbal <ID> <сумма> <валюта>` — выдать баланс\n"
         "`/backbal <ID> <сумма> <валюта>` — списать баланс\n"
         "`/ban <ID>` — забанить пользователя\n"
-        "`/unban <ID>` — разбанить пользователя\n\n"
+        "`/unban <ID>` — разбанить пользователя\n"
+        "`/users` — список всех пользователей\n\n"
         "*Примеры:*\n"
         "`/addbal 123456789 1000 rub`\n"
         "`/backbal 123456789 500 rub`\n"
@@ -797,6 +798,50 @@ async def cmd_unban(message: Message, command: CommandObject):
         await bot.send_message(target_id, "✅ Вы были разбанены в сервисе Fragment. Доступ восстановлен.")
     except:
         pass
+
+@dp.message(Command("users"))
+async def cmd_users(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        return  # Игнорируем команду от всех, кроме админа
+
+    con = db_conn()
+    rows = con.execute(
+        "SELECT user_id, name, username, balance, is_banned FROM users ORDER BY user_id"
+    ).fetchall()
+    con.close()
+
+    if not rows:
+        await message.answer("📭 В базе пока нет пользователей.")
+        return
+
+    # Формируем строки: @user — баланс ₽ — ✅/❌
+    lines = []
+    for row in rows:
+        username = row["username"]
+        if username:
+            tag = f"@{username}"
+        elif row["name"]:
+            tag = f"{row['name']} (ID: {row['user_id']})"
+        else:
+            tag = f"ID: {row['user_id']}"
+
+        balance = row["balance"] or 0.0
+        ban_icon = "❌" if row["is_banned"] else "✅"
+
+        lines.append(f"{tag} — {balance:.2f} ₽ — {ban_icon}")
+
+    header = f"👥 *Пользователи ({len(rows)})*\n\n"
+
+    # Telegram ограничивает сообщение 4096 символами — разбиваем на части
+    chunk = header
+    for line in lines:
+        if len(chunk) + len(line) + 1 > 4000:
+            await message.answer(chunk, parse_mode="Markdown")
+            chunk = ""
+        chunk += line + "\n"
+
+    if chunk.strip():
+        await message.answer(chunk, parse_mode="Markdown")
 
 # --- ОБРАБОТЧИКИ КНОПОК МЕНЮ ---
 
