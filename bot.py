@@ -258,23 +258,13 @@ async def create_deal_from_app(req: NewDealRequest):
     
     ensure_user(req.partner_id, partner_name)
     
-    # ОПРЕДЕЛЯЕМ РОЛИ ЗАРАНЕЕ
+    # ОПРЕДЕЛЯЕМ РОЛИ
     if req.role == 'buyer':
         buyer_id, buyer_name = req.creator_id, req.creator_name
         seller_id, seller_name = req.partner_id, partner_name
     else:
         seller_id, seller_name = req.creator_id, req.creator_name
         buyer_id, buyer_name = req.partner_id, partner_name
-
-    # ПРОВЕРКА БАЛАНСА ПОКУПАТЕЛЯ
-    amount_in_rub = req.amount * RATES_TO_RUB.get(req.currency, 1.0)
-    buyer_balance = get_balance(buyer_id)
-    if buyer_balance < amount_in_rub:
-        raise HTTPException(
-            400, 
-            f"У покупателя недостаточно средств для этой сделки. "
-            f"Нужно: {amount_in_rub:.2f} ₽, у него: {buyer_balance:.2f} ₽"
-        )
 
     deal_id = secrets.token_hex(3).upper()
     now = datetime.utcnow().isoformat()
@@ -405,9 +395,6 @@ async def handle_deal_action(deal_id: str, payload: DealActionIn):
         amount_in_rub = deal['amount'] * RATES_TO_RUB.get(deal['currency'], 1.0)
         
         # СПИСЫВАЕМ СРЕДСТВА У ПОКУПАТЕЛЯ (они уже были заморожены при принятии)
-        # В данной реализации мы их не возвращаем, а просто переводим продавцу
-        # Но так как при принятии мы их "заморозили" (списали с баланса),
-        # то сейчас просто начисляем продавцу.
         add_balance(deal['seller_id'], amount_in_rub)
         
         notify_text = f"✅ Сделка #{deal_id} завершена!\nПокупатель подтвердил получение. Средства переведены продавцу."
@@ -492,27 +479,28 @@ async def cb_accept(callback: CallbackQuery):
     
     amount_in_rub = amount * RATES_TO_RUB.get(currency, 1.0)
 
-    # ЗАМОРАЖИВАЕМ СРЕДСТВА ТОЛЬКО У ПОКУПАТЕЛЯ, независимо от того, кто нажал кнопку
-    if user_id == seller_id or user_id == buyer_id:
-        # Проверяем, что средства есть у покупателя
+    # ПРОВЕРКА: ТОЛЬКО ПОКУПАТЕЛЬ МОЖЕТ ПРИНЯТЬ И ТОЛЬКО ЕСЛИ У НЕГО ЕСТЬ ДЕНЬГИ
+    if user_id == buyer_id:
         if not freeze_balance(buyer_id, amount_in_rub):
             bal = get_balance(buyer_id)
-            await callback.answer(f"❌ Недостаточно средств у покупателя!\nНужно: {amount} {currency} ({amount_in_rub:.2f} ₽)\nУ него: {bal:.2f} ₽", show_alert=True)
+            await callback.answer(f"❌ Недостаточно средств!\nНужно: {amount} {currency} ({amount_in_rub:.2f} ₽)\nУ вас: {bal:.2f} ₽", show_alert=True)
             con.close()
             return
-
+            
         con.execute("UPDATE deals SET status = 'active' WHERE id = ?", (deal_id,))
         con.commit()
         con.close()
 
-        await callback.answer("Сделка принята! Средства покупателя заморожены.")
-        await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nГарант: {amount} {currency} заморожен у покупателя.")
+        await callback.answer("Сделка принята! Ваши средства заморожены.")
+        await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nВаш гарант: {amount} {currency} заморожен.")
         
-        # Уведомляем вторую сторону
-        other_id = seller_id if user_id == buyer_id else buyer_id
-        await bot.send_message(other_id, f"🎉 Сделка {deal_id} принята!\nСредства покупателя заморожены. Можно передавать товар.")
-        await callback.message.answer(f"Вы приняли сделку! Ожидайте выполнения условий.")
+        await bot.send_message(seller_id, f"🎉 Покупатель принял сделку {deal_id}!\nЕго средства заморожены. Можете передавать товар.")
+        await callback.message.answer(f"Вы приняли сделку! Ожидайте передачу товара от продавца.")
         
+    elif user_id == seller_id:
+        # Продавец не может принять сделку, он только создает/ждет
+        await callback.answer("Вы продавец. Сделку должен принять покупатель.", show_alert=True)
+        con.close()
     else:
         await callback.answer("Вы не являетесь участником этой сделки", show_alert=True)
         con.close()
