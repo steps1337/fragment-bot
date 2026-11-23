@@ -490,28 +490,32 @@ async def cb_accept(callback: CallbackQuery):
     
     amount_in_rub = amount * RATES_TO_RUB.get(currency, 1.0)
 
-    # ПРОВЕРКА: ТОЛЬКО ПОКУПАТЕЛЬ МОЖЕТ ПРИНЯТЬ И ТОЛЬКО ЕСЛИ У НЕГО ЕСТЬ ДЕНЬГИ
+    # ЕСЛИ НАЖАЛ ПОКУПАТЕЛЬ - ОН НЕ МОЖЕТ ПРИНЯТЬ СВОЮ ЖЕ СДЕЛКУ
     if user_id == buyer_id:
+        await callback.answer("Вы создатель этой сделки (покупатель). Ждите, пока продавец её примет.", show_alert=True)
+        con.close()
+        return
+
+    # ЕСЛИ НАЖАЛ ПРОДАВЕЦ - ПРОСТО ПРИНИМАЕМ, НО ПРОВЕРЯЕМ БАЛАНС ПОКУПАТЕЛЯ
+    if user_id == seller_id:
+        # Проверяем, что у покупателя (создателя) есть средства
         if not freeze_balance(buyer_id, amount_in_rub):
             bal = get_balance(buyer_id)
-            await callback.answer(f"❌ Недостаточно средств!\nНужно: {amount} {currency} ({amount_in_rub:.2f} ₽)\nУ вас: {bal:.2f} ₽", show_alert=True)
+            await callback.answer(f"❌ У покупателя недостаточно средств!\nНужно: {amount} {currency} ({amount_in_rub:.2f} ₽)\nУ него: {bal:.2f} ₽", show_alert=True)
             con.close()
             return
-            
+
         con.execute("UPDATE deals SET status = 'active' WHERE id = ?", (deal_id,))
         con.commit()
         con.close()
 
-        await callback.answer("Сделка принята! Ваши средства заморожены.")
-        await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nВаш гарант: {amount} {currency} заморожен.")
+        await callback.answer("Сделка принята!")
+        await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nГарант: {amount} {currency} заморожен у покупателя.")
         
-        await bot.send_message(seller_id, f"🎉 Покупатель принял сделку {deal_id}!\nЕго средства заморожены. Можете передавать товар.")
-        await callback.message.answer(f"Вы приняли сделку! Ожидайте передачу товара от продавца.")
+        # Уведомляем покупателя
+        await bot.send_message(buyer_id, f"🎉 Продавец принял вашу сделку {deal_id}!\nВаши средства заморожены. Можете передавать товар.")
+        await callback.message.answer(f"Вы приняли сделку! Передайте товар покупателю и нажмите кнопку в приложении.")
         
-    elif user_id == seller_id:
-        # Продавец не может принять сделку, он только создает/ждет
-        await callback.answer("Вы продавец. Сделку должен принять покупатель.", show_alert=True)
-        con.close()
     else:
         await callback.answer("Вы не являетесь участником этой сделки", show_alert=True)
         con.close()
