@@ -266,16 +266,15 @@ async def create_deal_from_app(req: NewDealRequest):
         seller_id, seller_name = req.creator_id, req.creator_name
         buyer_id, buyer_name = req.partner_id, partner_name
 
-    # ПРОВЕРКА БАЛАНСА: ТОЛЬКО ЕСЛИ СОЗДАТЕЛЬ - ПОКУПАТЕЛЬ
-    if req.role == 'buyer':
-        amount_in_rub = req.amount * RATES_TO_RUB.get(req.currency, 1.0)
-        buyer_balance = get_balance(req.creator_id)
-        if buyer_balance < amount_in_rub:
-            raise HTTPException(
-                400, 
-                f"У вас недостаточно средств для создания этой сделки. "
-                f"Нужно: {amount_in_rub:.2f} ₽, у вас: {buyer_balance:.2f} ₽"
-            )
+    # ПРОВЕРКА БАЛАНСА: СТРОГО У ПОКУПАТЕЛЯ (неважно, кто создатель)
+    amount_in_rub = req.amount * RATES_TO_RUB.get(req.currency, 1.0)
+    buyer_balance = get_balance(buyer_id)
+    if buyer_balance < amount_in_rub:
+        raise HTTPException(
+            400, 
+            f"У покупателя недостаточно средств для этой сделки. "
+            f"Нужно: {amount_in_rub:.2f} ₽, у него: {buyer_balance:.2f} ₽"
+        )
 
     deal_id = secrets.token_hex(3).upper()
     now = datetime.utcnow().isoformat()
@@ -512,9 +511,11 @@ async def cb_accept(callback: CallbackQuery):
         await callback.answer("Сделка принята!")
         await callback.message.edit_text(f"✅ Сделка {deal_id} принята!\nСтатус: В работе.\nГарант: {amount} {currency} заморожен у покупателя.")
         
-        # Уведомляем покупателя
-        await bot.send_message(buyer_id, f"🎉 Продавец принял вашу сделку {deal_id}!\nВаши средства заморожены. Можете передавать товар.")
-        await callback.message.answer(f"Вы приняли сделку! Передайте товар покупателю и нажмите кнопку в приложении.")
+        # ИСПРАВЛЕННЫЙ ТЕКСТ ДЛЯ ПОКУПАТЕЛЯ
+        await bot.send_message(buyer_id, f"🎉 Продавец принял вашу сделку {deal_id}!\nВаши средства заморожены. Ожидайте передачу товара от продавца.")
+        
+        # УВЕДОМЛЕНИЕ ДЛЯ ПРОДАВЦА (себе)
+        await callback.message.answer(f"Вы приняли сделку! Передайте товар покупателю и нажмите кнопку «Я передал товар» в приложении.")
         
     else:
         await callback.answer("Вы не являетесь участником этой сделки", show_alert=True)
