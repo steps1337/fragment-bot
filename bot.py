@@ -207,6 +207,11 @@ async def lifespan(app: FastAPI):
 api = FastAPI(lifespan=lifespan)
 api.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# 👇 НОВЫЙ ЭНДПОИНТ ДЛЯ UPTIMEROBOT
+@api.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
 @api.get("/resolve-username")
 async def resolve_username(username: str):
     clean_username = username.strip().lower()
@@ -798,7 +803,7 @@ async def cmd_users(message: Message):
         name = row["name"]
         user_id = row["user_id"]
         
-        # 👇 ИСПРАВЛЕННЫЙ БЛОК ВЫВОДА
+        # 👇 ИСПРАВЛЕННЫЙ БЛОК ВЫВОДА (Добавлено имя при отсутствии юзернейма)
         if username:
             tag = f"<a href='tg://user?id={user_id}'>@{username}</a>"
         elif name:
